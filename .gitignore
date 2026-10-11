@@ -1,0 +1,49 @@
+# ---------------- 构建产物 ----------------
+harmony/**/build/
+harmony/**/.cxx/
+harmony/.hvigor/
+harmony/**/oh_modules/
+harmony/**/node_modules/
+harmony/**/.preview/
+harmony/**/.test/
+**/*.hap
+**/*.har
+**/*.hsp
+
+# ---------------- 签名材料（绝不提交）----------------
+# 私钥库、证书请求、明文口令
+certs/*.p12
+certs/*.csr
+certs/*.pwd
+certs/*.cer
+certs/*.p7b
+certs/*.keystore
+certs/*.jks
+# 运行期临时目录（脚本用）
+.tmp-sign/
+
+# ---------------- 第三方参考源码 ----------------
+# 逆向参考仓库（MeshHun/carlife_pc_tool），自带 .git，不进本仓库。
+# 需要时自行 clone：git clone https://github.com/MeshHun/carlife_pc_tool.git refs/carlife_pc_tool
+refs/
+
+# ---------------- Python ----------------
+.venv*/
+__pycache__/
+*.pyc
+
+# ---------------- 旧项目遗留文件 ----------------
+# 另一个项目（HomeGame）的调试 Profile 与华为根 CA，与本工程无关
+HomeGameDebug.p7b
+手机.cer
+
+# ---------------- 编辑器 / 系统 ----------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---------------- AI 工作记忆（内部记录，不入公开库）----------------
+.workbuddy-ai/
+.commit-msg.txt

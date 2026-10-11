@@ -1,0 +1,6 @@
+{
+  "name": "libcarlifecodec.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "CarLife 采集编码 Native 模块（OH_AVScreenCapture + OH_VideoEncoder）"
+}

@@ -1,0 +1,32 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "CarLife 手机端主模块"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "CarLife 手机端"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "CarHi"
+    },
+    {
+      "name": "BackgroundAbility_desc",
+      "value": "后台投屏保活任务"
+    },
+    {
+      "name": "BackgroundAbility_label",
+      "value": "投屏保活"
+    },
+    {
+      "name": "reason_background",
+      "value": "车机投屏需要在后台持续编码推流"
+    },
+    {
+      "name": "reason_bluetooth",
+      "value": "用于导航语音通过蓝牙输出到车机"
+    }
+  ]
+}

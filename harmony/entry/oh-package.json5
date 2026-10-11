@@ -1,0 +1,11 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "CarLife 手机端主模块",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {
+    "libcarlifecodec.so": "file:./src/main/cpp/types/libcarlifecodec"
+  }
+}
