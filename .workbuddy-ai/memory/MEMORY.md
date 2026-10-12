@@ -97,6 +97,14 @@
 - 安装：**必须 cd 到产物目录用相对路径**，hdc 对 Windows 绝对路径会拼错：
   `cd harmony/entry/build/default/outputs/default && hdc install -r entry-default-signed.hap`
 - 包名：`com.carhi.carlifephone`
+- **本机工具链**：DevEco Studio 在 `E:\Program Files\Huawei\DevEco Studio`
+  （`build.sh`/`sign.sh` 已加入自动探测，排在 `E:/AITools/command-line-tools` 之前）。
+- **本机签名**：用 DevEco 自动签名材料 `C:\Users\dev\.ohos\config\default_harmony_*.{p12,cer,p7b}`
+  （`bundle-name=com.carhi.carlifephone`，debug Profile 绑定真机 UDID）。
+  ★ `build-profile.json5` 的 `products[0]` **必须**含 `"signingConfig": "default"`
+  —— DevEco「同步签名」只写 `signingConfigs[]`，不写产品引用，漏了只出 unsigned HAP。
+  该文件含 DevEco **加密口令**，仓库是 public，已 `git update-index --skip-worktree`，
+  **换机器需重设一次**。
 
 ## 调试环境（真机 WiFi 调试，首选）
 - **真机** `MRT-AL10`：`192.168.31.126:38957`，HarmonyOS 7.0.0.109，API 26。
@@ -152,3 +160,8 @@
 - `setExtraOptions failed on :7240`（关 Nagle 失败），低延迟优化未生效，代码已容错
 - UDP 7999 发现端口未实现，靠手动填 IP
 - 验证后台采集（切后台画面是否持续）尚未完成
+- `tools/static_check.mjs` 依赖 `refs/carlife_pc_tool`（**gitignored，不跨机同步**）。
+  自 2026-10-12 起 ArkTS 常量按官方 `CommonParams` 修正后，该检查会报 5 处 DIFF
+  （HU_AUTHEN_RESULT 98378/98380、MD_FOREGROUND 65563/65560、MD_BACKGROUND 65564/65561、
+  VIDEO_ENCODER_PAUSE 98314/98316、VIDEO_ENCODER_RESET 98315/98311）——**属参考值过时，非代码错**。
+  其中 **98378 vs 98380 两份逆向结论冲突**，裁决需 `refs/OFFICIAL_PROTOCOL.md`（本机无，仅在另一台机器）。
