@@ -21,6 +21,13 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        // 长时任务类型：决定切后台/熄屏后不被系统回收
+        // AUDIO_RECORDING：官方用途含「后台录制与屏幕采集」，是本方案保活的关键
+        // LOCATION：辅助提升保活优先级（CarLife 官方 Android 版亦使用 location 类型）
+        "backgroundModes": [
+          "audioRecording",
+          "location"
+        ],
         "skills": [
           {
             "entities": [
@@ -39,6 +46,10 @@
       },
       {
         "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        // 无线连接场景下保持 WiFi 不休眠，避免车机连接期间网络中断
+        "name": "ohos.permission.GET_WIFI_INFO"
       },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",

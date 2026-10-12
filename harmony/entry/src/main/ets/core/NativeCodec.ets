@@ -18,6 +18,9 @@ import {
   startCapture,
   stopCapture,
   requestKeyFrame as nativeRequestKeyFrame,
+  setFrameRate as nativeSetFrameRate,
+  restartCapture as nativeRestartCapture,
+  isRecoverable as nativeIsRecoverable,
   encodedSize,
   CaptureOptions,
   EncodedSize
@@ -117,6 +120,46 @@ export class NativeCodec {
     if (this.running) {
       nativeRequestKeyFrame();
     }
+  }
+
+  /**
+   * 动态调整编码帧率（车机 98316）。
+   * 走编码器软刷新，不重建管线 —— 保持车机侧连接与画面连续性。
+   * @returns true 表示调整成功
+   */
+  setFrameRate(frameRate: number): boolean {
+    if (!this.running || frameRate <= 0) {
+      return false;
+    }
+    const ret: number = nativeSetFrameRate(frameRate);
+    if (ret !== 0) {
+      this.listener?.onLog(`[编码] 帧率调整失败(${ret})，沿用原帧率`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 仅重启屏幕采集（编码器保持存活）。
+   * 用于"可恢复中断"后的快速恢复，比整体 stop/start 更快、画面更稳。
+   * @returns true 表示恢复成功
+   */
+  restartCapture(): boolean {
+    if (!this.running) {
+      return false;
+    }
+    const stage: number = nativeRestartCapture();
+    if (stage === 0) {
+      this.listener?.onLog('[编码] 采集已自动恢复');
+      return true;
+    }
+    this.listener?.onLog(`[编码] 采集恢复失败: ${stageName(stage)}`);
+    return false;
+  }
+
+  /** 判定错误码是否值得重试（false = 用户主动停止，别重试） */
+  static isRecoverable(code: number): boolean {
+    return nativeIsRecoverable(code);
   }
 
   get isRunning(): boolean {

@@ -31,6 +31,14 @@ export interface ChannelServerListener {
   onChannelDisconnected?: (channel: number) => void;
   /** 控制通道收到报文 */
   onCommandMessage?: (msg: Message) => void;
+  /**
+   * 视频通道收到报文。
+   *
+   * 作用：车机经 VIDEO 通道(8240)下发 `131074` 心跳，官方每 200ms 轮询读取，
+   * 收到即刷新保活时间戳。**本通道的入站数据必须处理，不能丢弃** ——
+   * 丢了会让车机判定手机失联，表现为周期性断开重连。
+   */
+  onVideoMessage?: (msg: Message) => void;
   /** 出错 */
   onError?: (channel: number, err: string) => void;
 }
@@ -118,8 +126,12 @@ class ChannelServer {
           }
           if (this.channel === CHANNEL_CMD && this.listener.onCommandMessage) {
             this.listener.onCommandMessage(msg);
+          } else if (this.channel === CHANNEL_VIDEO && this.listener.onVideoMessage) {
+            // 视频通道并非"只发不收"：车机在这里下发 131074 心跳。
+            // 漏掉这一条会导致车机判定手机失联 → 周期性断开重连。
+            this.listener.onVideoMessage(msg);
           }
-          // 其余通道只接收不处理：本方案不涉及触控回传与车机侧回传数据
+          // 其余通道（触控/音频）确实只接收不处理
         }
       } catch (e) {
         const err = e as BusinessError;

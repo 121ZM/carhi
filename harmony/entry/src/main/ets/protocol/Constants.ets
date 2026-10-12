@@ -55,7 +55,18 @@ export const UDP_DISCOVERY_PORT: number = 7999;
 export const MSG_CMD_HU_PROTOCOL_VERSION: number = 98305;
 /** 0x00010002: 手机回复版本匹配状态 (CarlifeProtocolVersionMatchStatus) */
 export const MSG_CMD_MD_PROTOCOL_VERSION_MATCH_STATUS: number = 65538;
-/** 0x00018027: 车端发送统计信息 (CarlifeStatisticsInfo) */
+/**
+ * 0x00018027: 车端发送统计信息 (CarlifeStatisticsInfo)
+ *
+ * 官方常量名（CommonParams.java）：MSG_CMD_STATISTIC_INFO
+ * 官方处理：CarlifeConnectHsgHandler.java:374
+ *   - 记录车机渠道号 / CUID
+ *   - 若为老车机，回复 65611 鉴权结果
+ *   - 发起 65617 特征配置请求
+ *
+ * 注：真机（卓易通）在版本协商后直接发本条，而非 98307 HU_INFO。
+ * 这是握手推进的关键触发点。
+ */
 export const MSG_CMD_HU_STATISTICAL_INFO: number = 98343;
 
 // ================= 设备信息与鉴权 (Channel 1) =================
@@ -65,22 +76,42 @@ export const MSG_CMD_HU_INFO: number = 98307;
 export const MSG_CMD_MD_INFO: number = 65540;
 /** 0x0001004B: 手机发送鉴权结果 (CarlifeAuthenResult) */
 export const MSG_CMD_MD_AUTHEN_RESULT: number = 65611;
-/** 0x0001804C: 车端确认鉴权结果 */
-export const MSG_CMD_HU_AUTHEN_RESULT: number = 98380;
+/**
+ * 0x0001804A: 车端确认鉴权结果
+ *
+ * 修正：官方值为 98378（0x1804A），此前本项目误写 98380。
+ * 依据：CommonParams.MSG_CMD_HU_AUTHEN_RESULT = 98378
+ */
+export const MSG_CMD_HU_AUTHEN_RESULT: number = 98378;
+/** 0x00018048: 车端发起鉴权请求 */
+export const MSG_CMD_HU_AUTHEN_REQUEST: number = 98376;
 
 // ================= 特征配置 (Channel 1) =================
-/** 0x00010051: 手机请求配置列表 (CarlifeFeatureConfigList) */
+/**
+ * 0x00010051: 手机请求配置列表 (CarlifeFeatureConfigList)
+ *
+ * 官方常量名：MSG_CMD_MD_FEATURE_CONFIG_REQUEST
+ * 官方在 sendFeatureConfigRequest() 中发**空 payload**，仅发 ID 本身。
+ */
 export const MSG_CMD_MD_FEATURE_CONFIG_LIST: number = 65617;
-/** 0x00018052: 车端回复配置列表 (CarlifeFeatureConfigList) */
+/**
+ * 0x00018052: 车端回复配置列表 (CarlifeFeatureConfigList)
+ * 官方常量名：MSG_CMD_HU_FEATURE_CONFIG_RESPONSE
+ */
 export const MSG_CMD_HU_FEATURE_CONFIG_LIST: number = 98386;
 
 // ================= 前后台状态与心跳 (Channel 1) =================
-/** 0x00010018: 手机端 CarLife 进入前台 */
-export const MSG_CMD_MD_FOREGROUND: number = 65560;
-/** 0x00010019: 手机端 CarLife 退入后台 */
-export const MSG_CMD_MD_BACKGROUND: number = 65561;
-/** 0x0001001B: 手机端向车机发送的保活心跳 */
-export const MSG_CMD_MD_HEARTBEAT: number = 65563;
+// 说明：以下 4 个 ID 已按官方 CommonParams.java 修正（原实现存在错位）。
+/** 0x0001000F: 手机屏幕点亮（官方 MSG_CMD_SCREEN_ON） */
+export const MSG_CMD_MD_SCREEN_ON: number = 65560;
+/** 0x00010010: 手机屏幕熄灭（官方 MSG_CMD_SCREEN_OFF） */
+export const MSG_CMD_MD_SCREEN_OFF: number = 65561;
+/** 0x00010011: 手机屏幕解锁（官方 MSG_CMD_SCREEN_USERPRESENT） */
+export const MSG_CMD_MD_SCREEN_USERPRESENT: number = 65562;
+/** 0x0001001B: 手机端 CarLife 进入前台（官方 MSG_CMD_FOREGROUND） */
+export const MSG_CMD_MD_FOREGROUND: number = 65563;
+/** 0x0001001C: 手机端 CarLife 退入后台（官方 MSG_CMD_BACKGROUND） */
+export const MSG_CMD_MD_BACKGROUND: number = 65564;
 /** 0x00010021: 返回车机主页 */
 export const MSG_CMD_MD_BACK_TO_HOME: number = 65569;
 
@@ -133,10 +164,26 @@ export const MSG_CMD_VIDEO_ENCODER_INIT_DONE: number = 65551;
 export const MSG_CMD_HU_VIDEO_ENCODER_INIT: number = 98311;
 /** 0x00018009: 车端确认开始推流 (无负载) */
 export const MSG_CMD_VIDEO_ENCODER_START: number = 98313;
-/** 0x0001800C: 暂停推流 */
-export const MSG_CMD_VIDEO_ENCODER_PAUSE: number = 98316;
-/** 0x00018007: 重置推流 (同 HU_VIDEO_ENCODER_INIT) */
-export const MSG_CMD_VIDEO_ENCODER_RESET: number = 98311;
+
+/**
+ * 0x0001800A: 车端请求暂停推流。
+ * ⚠️ 曾错写为 98316 —— 那是 FRAME_RATE_CHANGE，一旦混淆会导致
+ * 车机每次调帧率都被误判成"暂停"，进而拆掉整条推流管线（掉线元凶）。
+ * 官方值见 CommonParams.MSG_CMD_VIDEO_ENCODER_PAUSE = 98314。
+ */
+export const MSG_CMD_VIDEO_ENCODER_PAUSE: number = 98314;
+
+/** 0x0001800B: 车端请求重置推流通道 */
+export const MSG_CMD_VIDEO_ENCODER_RESET: number = 98315;
+
+/**
+ * 0x0001800C: 车端请求变更推流帧率（携带目标帧率）。
+ * 官方处理：只调整编码器帧率并回 65549，**绝不重启管线**。
+ */
+export const MSG_CMD_VIDEO_ENCODER_FRAME_RATE_CHANGE: number = 98316;
+
+/** 0x0001000D: 手机回复帧率变更完成（与 MD_VIDEO_FRAME_RATE 同值 65549） */
+export const MSG_CMD_VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: number = 65549;
 
 // ================= 心跳与流媒体数据 =================
 /** 0x00020002: 车端心跳包 */
@@ -224,12 +271,15 @@ const MSG_NAMES: Record<number, string> = {
   65540: 'MD_INFO',
   65611: 'MD_AUTHEN_RESULT',
   65609: 'MD_AUTHEN_RESPONSE',
-  98380: 'HU_AUTHEN_RESULT',
+  98378: 'HU_AUTHEN_RESULT',
+  98376: 'HU_AUTHEN_REQUEST',
   65617: 'MD_FEATURE_CONFIG_LIST',
   98386: 'HU_FEATURE_CONFIG_LIST',
-  65560: 'MD_FOREGROUND',
-  65561: 'MD_BACKGROUND',
-  65563: 'MD_HEARTBEAT',
+  65560: 'MD_SCREEN_ON',
+  65561: 'MD_SCREEN_OFF',
+  65562: 'MD_SCREEN_USERPRESENT',
+  65563: 'MD_FOREGROUND',
+  65564: 'MD_BACKGROUND',
   65569: 'MD_BACK_TO_HOME',
   65570: 'MD_MIC_RECORD_WAKEUP_START',
   65571: 'MD_MIC_RECORD_END',
@@ -253,7 +303,9 @@ const MSG_NAMES: Record<number, string> = {
   65551: 'VIDEO_ENCODER_INIT_DONE',
   98311: 'HU_VIDEO_ENCODER_INIT',
   98313: 'VIDEO_ENCODER_START',
-  98316: 'VIDEO_ENCODER_PAUSE',
+  98314: 'VIDEO_ENCODER_PAUSE',
+  98315: 'VIDEO_ENCODER_RESET',
+  98316: 'VIDEO_ENCODER_FRAME_RATE_CHANGE',
   131073: 'VIDEO_DATA',
   131074: 'HU_HEARTBEAT',
   196609: 'MEDIA_INIT',

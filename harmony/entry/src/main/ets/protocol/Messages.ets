@@ -227,7 +227,56 @@ export class CarlifeStatisticsInfo {
 }
 
 // ============================================================
-// 5. CarlifeAuthenResult
+// 5. CarlifeAuthenRequest / CarlifeAuthenResponse
+//    AuthenRequest:  randomValue=1(string)     车机 → 手机（98376）
+//    AuthenResponse: encryptValue=1(string)    手机 → 车机（65609）
+//
+// 依据车机端反编译 a/a/a/a/m/k/a/c.java:184-233：
+//   车机收到 65609 后会先取消 30s「鉴权超时」定时器（hVar.c(this.h)），
+//   再判断 `!TextUtils.isEmpty(response.getEncryptValue())`；
+//   非空即 z=true（鉴权通过），否则重新计时 5s 再断开。
+//   ⚠ 若手机从不发 65609，30s 定时器必然到期 → 打印
+//     "Carlife Connect authentication failed." → 断开整条链路。
+//     这正是本项目此前「每隔约 30 秒稳定掉线」的根因。
+// ============================================================
+export class CarlifeAuthenRequest {
+  randomValue: string = '';
+
+  constructor(randomValue: string = '') {
+    this.randomValue = randomValue;
+  }
+
+  static decode(data: Uint8Array): CarlifeAuthenRequest {
+    const msg = new CarlifeAuthenRequest();
+    const r = new ProtobufReader(data);
+    while (!r.eof) {
+      const f: Field = r.readField();
+      if (f.fieldNumber === 1 && f.bytesValue !== null) {
+        msg.randomValue = utf8Decode(f.bytesValue);
+      }
+    }
+    return msg;
+  }
+}
+
+export class CarlifeAuthenResponse {
+  encryptValue: string = '';
+
+  constructor(encryptValue: string = '') {
+    this.encryptValue = encryptValue;
+  }
+
+  encode(): Uint8Array {
+    const w = new ProtobufWriter();
+    if (this.encryptValue !== '') {
+      w.writeString(1, this.encryptValue);
+    }
+    return w.toBytes();
+  }
+}
+
+// ============================================================
+// 6. CarlifeAuthenResult
 //    authenResult=1(bool)
 // ============================================================
 export class CarlifeAuthenResult {

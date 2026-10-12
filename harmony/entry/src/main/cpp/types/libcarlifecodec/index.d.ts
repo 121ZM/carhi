@@ -49,6 +49,31 @@ export const stopCapture: () => void;
 /** 请求立即编码一个 I 帧 */
 export const requestKeyFrame: () => void;
 
+/**
+ * 运行中动态调整编码帧率。
+ *
+ * 对应车机下发的 98316（FRAME_RATE_CHANGE）。走编码器软刷新，
+ * **不重建采集/编码管线** —— 重建会让车机侧重新等 I 帧，表现为掉线。
+ *
+ * @param frameRate 目标帧率（fps）
+ * @returns 0 成功；非 0 失败（原帧率继续生效）
+ */
+export const setFrameRate: (frameRate: number) => number;
+
+/**
+ * 仅重启屏幕采集，编码器保持存活。
+ * 用于收到"可恢复中断"（切后台/来电/被其他应用抢占）后的快速恢复。
+ * @returns 0 成功；非 0 为失败阶段号
+ */
+export const restartCapture: () => number;
+
+/**
+ * 判定错误码是否可恢复。
+ * true  -> 临时性中断，可以重试重启采集
+ * false -> 用户主动取消/停止，重试没有意义（且会再次骚扰用户）
+ */
+export const isRecoverable: (code: number) => boolean;
+
 /** 管线是否在运行 */
 export const isRunning: () => boolean;
 

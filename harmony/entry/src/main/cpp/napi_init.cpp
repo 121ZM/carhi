@@ -291,6 +291,70 @@ napi_value RequestKeyFrame(napi_env env, napi_callback_info info) {
     return undefined;
 }
 
+/**
+ * 运行中动态调整编码帧率（车机 98316）。
+ * 返回 0 表示成功；非 0 表示失败（管线未受影响）。
+ */
+napi_value SetFrameRate(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int32_t frameRate = 0;
+    if (argc < 1 || napi_get_value_int32(env, args[0], &frameRate) != napi_ok) {
+        napi_value bad = nullptr;
+        napi_create_int32(env, -1, &bad);
+        return bad;
+    }
+
+    std::lock_guard<std::mutex> guard(g_lock);
+    int32_t ret = -1;
+    if (g_encoder != nullptr) {
+        ret = g_encoder->SetFrameRate(frameRate);
+    }
+    napi_value result = nullptr;
+    napi_create_int32(env, ret, &result);
+    return result;
+}
+
+/**
+ * 仅重启屏幕采集，编码器保持存活。
+ * 供上层在收到"可恢复中断"（切后台/来电/被抢占）后调用。
+ * 返回 0 表示成功，非 0 为失败阶段号。
+ */
+napi_value RestartCapture(napi_env env, napi_callback_info info) {
+    (void)info;
+    std::lock_guard<std::mutex> guard(g_lock);
+    int32_t stage = 1;
+    if (g_encoder != nullptr) {
+        stage = g_encoder->RestartCapture();
+    }
+    napi_value result = nullptr;
+    napi_create_int32(env, stage, &result);
+    return result;
+}
+
+/**
+ * 判定错误码是否可恢复（true 表示值得重试，false 表示用户主动停止）。
+ * 供 ArkTS 侧决定"重试"还是"停流"。
+ */
+napi_value IsRecoverable(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    bool recoverable = false;
+    if (argc >= 1 && args[0] != nullptr) {
+        int32_t code = 0;
+        if (napi_get_value_int32(env, args[0], &code) == napi_ok) {
+            recoverable = carhi::ScreenEncoder::IsRecoverable(code);
+        }
+    }
+    napi_value result = nullptr;
+    napi_get_boolean(env, recoverable, &result);
+    return result;
+}
+
 napi_value IsRunning(napi_env env, napi_callback_info info) {
     (void)info;
     bool running = false;
@@ -333,6 +397,9 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"startCapture", nullptr, StartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopCapture", nullptr, StopCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"requestKeyFrame", nullptr, RequestKeyFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setFrameRate", nullptr, SetFrameRate, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"restartCapture", nullptr, RestartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isRecoverable", nullptr, IsRecoverable, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isRunning", nullptr, IsRunning, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"encodedSize", nullptr, EncodedSize, nullptr, nullptr, nullptr, napi_default, nullptr},
     };

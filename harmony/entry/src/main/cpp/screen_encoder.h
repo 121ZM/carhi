@@ -40,6 +40,26 @@ struct EncodedFrame {
     bool keyFrame;
 };
 
+/**
+ * 采集中断的错误码约定（负值，与系统 errno 区分开）
+ *
+ * 关键区分：
+ *   "用户主动停止" —— 用户明确取消授权/主动停止，重试没有意义，上层应停流。
+ *   "系统临时打断" —— 切后台、来电、其他应用抢占，重试通常能恢复，上层应重启采集。
+ */
+enum CaptureInterrupt {
+    /** 用户在授权弹窗点了"取消" —— 致命，重试会再次弹窗骚扰用户 */
+    INTERRUPT_CANCELED_BY_USER = -1,
+    /** 用户主动停止采集 —— 致命 */
+    INTERRUPT_STOPPED_BY_USER = -2,
+    /** 来电打断 —— 可恢复（通话结束后可继续） */
+    INTERRUPT_STOPPED_BY_CALL = -3,
+    /** 被其他应用/系统抢占 —— 可恢复 */
+    INTERRUPT_BY_OTHER = -4,
+    /** 底层采集错误 —— 可恢复（多数为临时性） */
+    INTERRUPT_CAPTURE_ERROR = -5,
+};
+
 /** 编码参数 */
 struct EncoderParams {
     int32_t width = 1280;
@@ -80,7 +100,31 @@ public:
     /** 请求立即编一个 I 帧（车机刚连上时用，避免等一个 GOP） */
     void RequestKeyFrame();
 
+    /**
+     * 运行中动态调整编码帧率（车机下发 98316 时调用）。
+     *
+     * 走 OH_VideoEncoder_SetParameter 的软刷新路径，**不重建管线** ——
+     * 重建会强制更换 Surface 并让车机侧重新等待 I 帧，表现为掉线。
+     *
+     * @return 0 成功；非 0 失败
+     */
+    int32_t SetFrameRate(int32_t frameRate);
+
+    /**
+     * 仅重启屏幕采集（编码器保持存活）。
+     *
+     * 用途：切后台/来电/被其他应用抢占导致采集被系统掐断后，不必销毁整个
+     * 编码管线，只重建采集侧即可恢复出帧。相比完整 Stop()+Start()，
+     * 这条路径不会重置编码器的码率控制状态，恢复更快、画面更稳。
+     *
+     * @return 0 成功；非 0 为 StartStage 阶段号
+     */
+    int32_t RestartCapture();
+
     bool IsRunning() const { return running_.load(); }
+
+    /** 判定某个中断码是否值得重试（可恢复） */
+    static bool IsRecoverable(int32_t code);
 
     /** 编码器输出的宽高（可能与请求值不同，编码器会按对齐调整） */
     int32_t EncodedWidth() const { return encodedWidth_.load(); }
@@ -99,6 +143,19 @@ private:
 
     void HandleNewOutputBuffer(uint32_t index, OH_AVBuffer *buffer);
     void EmitError(int32_t code, const std::string &msg);
+
+    /**
+     * 创建并启动屏幕采集（假定编码器已就绪）。
+     * 必须在持有 lock_ 的前提下调用。
+     * @return 0 成功；非 0 为 StartStage 阶段号
+     */
+    int32_t StartCaptureLocked();
+
+    /**
+     * 在采集启动前设置 OH_AVScreenCapture_CaptureStrategy。
+     * 必须在 StartScreenCapture* 之前调用；失败仅记日志，不阻断采集。
+     */
+    void ApplyCaptureStrategyLocked();
 
     /** 释放编码器相关资源 */
     void ReleaseCodec();
@@ -121,6 +178,13 @@ private:
     OH_AVCodec *codec_ = nullptr;
     OH_AVScreenCapture *capture_ = nullptr;
     OHNativeWindow *encoderSurface_ = nullptr;
+
+    /**
+     * 上一次采集重启的时间点（steady_clock 毫秒）。
+     * 用于抑制"重启 → 系统又报状态 → 又重启"的震荡：
+     * 编码器 Surface 每次重建都会让车机侧丢一段流，所以重启必须低频。
+     */
+    int64_t lastRestartMs_ = 0;
 
     std::mutex lock_;
 };

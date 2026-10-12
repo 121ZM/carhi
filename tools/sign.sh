@@ -15,12 +15,28 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CERTS="$ROOT/certs"
 HARMONY="$ROOT/harmony"
+
+# 自动探测 DevEco Studio / Command Line Tools 安装目录
+if [ -z "${CLT_HOME:-}" ]; then
+  for candidate in \
+      "/d/dev/Huawei/DevEco Studio" \
+      "D:/dev/Huawei/DevEco Studio" \
+      "/d/dev/DevEco Studio" \
+      "D:/dev/DevEco Studio" \
+      "E:/AITools/command-line-tools" ; do
+    if [ -f "$candidate/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar" ]; then
+      CLT_HOME="$candidate"
+      break
+    fi
+  done
+fi
 CLT_HOME="${CLT_HOME:-E:/AITools/command-line-tools}"
 SIGN_TOOL="$CLT_HOME/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar"
 
 # ---------------- JDK ----------------
 if [ -z "${JAVA_HOME:-}" ]; then
   for candidate in \
+      "$CLT_HOME/jbr" \
       "C:/Users/dev/.jdks/jbr_dcevm-11.0.16" \
       "C:/Program Files/Java/jdk-17" \
       "C:/Program Files/Java/jdk-11" ; do

@@ -1,5 +1,6 @@
 #include "screen_encoder.h"
 
+#include <chrono>
 #include <cstring>
 
 #include <hilog/log.h>
@@ -9,6 +10,7 @@
 #define LOG_DOMAIN 0x0001
 #define LOG_TAG "CarHiNative"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) OH_LOG_Print(LOG_APP, LOG_WARN, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 
 namespace carhi {
@@ -28,6 +30,13 @@ enum StartStage {
     STAGE_INIT_CAPTURE_FAILED = 8,
     STAGE_START_CAPTURE_FAILED = 9,
 };
+
+/**
+ * 采集重启冷却时间（毫秒）。
+ * 重建采集会换掉编码器 Surface，车机侧必须等到下一个 I 帧才能恢复，
+ * 所以低于这个间隔的重复重启请求一律忽略（见 RestartCapture）。
+ */
+constexpr int64_t kRestartCooldownMs = 3000;
 
 /** 把失败阶段翻成人话，直接进日志与 UI */
 const char *StageName(int32_t stage) {
@@ -140,25 +149,62 @@ void ScreenEncoder::OnCaptureState(OH_AVScreenCapture *capture, OH_AVScreenCaptu
     if (self == nullptr) {
         return;
     }
-    // 这几个状态是"用户/系统把采集掐了"，必须让上层知道，否则会一直推空流
     switch (stateCode) {
+        // ---- 正常事件，绝不触发重启 ----
         case OH_SCREEN_CAPTURE_STATE_STARTED:
             LOGI("screen capture started");
             break;
+
+        // 本方案音频走蓝牙 A2DP，根本不用麦克风。系统报麦克风不可用/被静音
+        // 属于正常现象（例如无麦克风权限、被其他应用占用）。
+        // ⚠️ 历史教训：这几个状态曾被当成"采集中断"去重启管线，结果每 2 秒就把
+        // 好好的采集拆掉重建，车机侧表现为持续掉线。必须忽略。
+        case OH_SCREEN_CAPTURE_STATE_MIC_UNAVAILABLE:
+            LOGI("mic unavailable (ignored, audio via A2DP)");
+            break;
+        case OH_SCREEN_CAPTURE_STATE_MIC_MUTED_BY_USER:
+            LOGI("mic muted (ignored, audio via A2DP)");
+            break;
+        case OH_SCREEN_CAPTURE_STATE_MIC_UNMUTED_BY_USER:
+            LOGI("mic unmuted (ignored, audio via A2DP)");
+            break;
+
+        // 隐私窗口进入/退出：画面内容变化，采集管线本身没断，继续推即可。
+        case OH_SCREEN_CAPTURE_STATE_ENTER_PRIVATE_SCENE:
+            LOGI("private scene entered (content masked, capture continues)");
+            break;
+        case OH_SCREEN_CAPTURE_STATE_EXIT_PRIVATE_SCENE:
+            LOGI("private scene exited");
+            break;
+
+        // 26.0.0 新增的应用侧暂停/恢复：我们从不主动暂停，记录即可。
+        case OH_SCREEN_CAPTURE_STATE_PAUSED_BY_USER:
+        case OH_SCREEN_CAPTURE_STATE_RESUMED_BY_USER:
+        case OH_SCREEN_CAPTURE_STATE_PAUSED_BY_APP:
+        case OH_SCREEN_CAPTURE_STATE_RESUMED_BY_APP:
+            LOGI("screen capture pause/resume state=%{public}d", static_cast<int32_t>(stateCode));
+            break;
+
+        // ---- 采集真的被终止，需要上层介入 ----
+        // 注意：系统也可能用 STOPPED_BY_USER_SWITCHES 表达"捕获源切换"，
+        // 但那属于正常生命周期事件，不做恢复，仅记录。
+        case OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER_SWITCHES:
+            LOGI("screen capture stopped by user switches (source changed)");
+            break;
         case OH_SCREEN_CAPTURE_STATE_CANCELED:
-            self->EmitError(-1, "screen capture canceled by user");
+            self->EmitError(INTERRUPT_CANCELED_BY_USER, "screen capture canceled by user");
             break;
         case OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER:
-            self->EmitError(-2, "screen capture stopped by user");
+            self->EmitError(INTERRUPT_STOPPED_BY_USER, "screen capture stopped by user");
             break;
         case OH_SCREEN_CAPTURE_STATE_STOPPED_BY_CALL:
-            self->EmitError(-3, "screen capture stopped by incoming call");
+            self->EmitError(INTERRUPT_STOPPED_BY_CALL, "screen capture stopped by incoming call");
             break;
         case OH_SCREEN_CAPTURE_STATE_INTERRUPTED_BY_OTHER:
-            self->EmitError(-4, "screen capture interrupted by other app");
+            self->EmitError(INTERRUPT_BY_OTHER, "screen capture interrupted by other app");
             break;
         default:
-            LOGI("screen capture state=%{public}d", static_cast<int32_t>(stateCode));
+            LOGI("screen capture state=%{public}d (unhandled)", static_cast<int32_t>(stateCode));
             break;
     }
 }
@@ -167,8 +213,15 @@ void ScreenEncoder::OnCaptureError(OH_AVScreenCapture *capture, int32_t errorCod
     (void)capture;
     auto *self = static_cast<ScreenEncoder *>(userData);
     if (self != nullptr) {
-        self->EmitError(errorCode, "screen capture error");
+        // 底层报错多为临时性问题（surface 重建、系统资源紧张），标记为可恢复
+        self->EmitError(INTERRUPT_CAPTURE_ERROR, "screen capture error");
     }
+    LOGE("capture error callback code=%{public}d", errorCode);
+}
+
+bool ScreenEncoder::IsRecoverable(int32_t code) {
+    // 只有"用户在系统弹窗点取消/主动停止"才是致命；其余都值得重试
+    return code != INTERRUPT_CANCELED_BY_USER && code != INTERRUPT_STOPPED_BY_USER;
 }
 
 void ScreenEncoder::EmitError(int32_t code, const std::string &msg) {
@@ -266,13 +319,35 @@ int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
     encodedHeight_.store(params_.height);
 
     // ---------------- 2. 屏幕采集 ----------------
+    int32_t captureStage = StartCaptureLocked();
+    if (captureStage != STAGE_OK) {
+        ReleaseCodec();
+        return captureStage;
+    }
+
+    running_.store(true);
+
+    LOGI("pipeline up: %{public}dx%{public}d@%{public}d bitrate=%{public}d",
+         params_.width, params_.height, params_.frameRate, params_.bitrate);
+    if (onLog_) {
+        onLog_("采集与编码管线已启动");
+    }
+    return STAGE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// 采集侧：独立成函数，便于"只重建采集、不动编码器"的快速恢复
+// ---------------------------------------------------------------------------
+
+int32_t ScreenEncoder::StartCaptureLocked() {
     capture_ = OH_AVScreenCapture_Create();
     if (capture_ == nullptr) {
-        ReleaseCodec();
         return STAGE_CREATE_CAPTURE_FAILED;
     }
 
     OH_AVScreenCaptureConfig config{};
+    // 整屏采集：本方案推的就是整个手机画面（用户在手机上开系统驾驶模式，
+    // 本应用在后台把整块屏推给车机），因此固定 HOME_SCREEN，不做窗口级采集。
     config.captureMode = OH_CAPTURE_HOME_SCREEN;
     config.dataType = OH_ORIGINAL_STREAM;   // 原始流：交给编码器，不落文件
 
@@ -303,7 +378,6 @@ int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
     OH_AVSCREEN_CAPTURE_ErrCode scErr = OH_AVScreenCapture_Init(capture_, config);
     if (scErr != AV_SCREEN_CAPTURE_ERR_OK) {
         ReleaseCapture();
-        ReleaseCodec();
         return STAGE_INIT_CAPTURE_FAILED;
     }
 
@@ -311,20 +385,109 @@ int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
     OH_AVScreenCapture_SetErrorCallback(capture_, &ScreenEncoder::OnCaptureError, this);
     OH_AVScreenCapture_SetMaxVideoFrameRate(capture_, params_.frameRate);
 
+    // ★ 采集策略：必须在 StartScreenCapture* 之前设置，否则返回 INVALID_STATE。
+    // 关键作用是关掉"启动后统一弹 Picker（授权框）"——CarLife 场景下手机固定作为
+    // 常驻推流端，每次重启采集都弹框会直接把投屏画面打断，且无法在息屏/无人值守下工作。
+    // 参考：native_avscreen_capture.h 中 OH_AVScreenCapture_StrategyForPickerPopUp
+    //       "If set to false, it means that the APP don't need to pop up the Picker
+    //        after screen capture starts" （@since 20）
+    ApplyCaptureStrategyLocked();
+
     // 采集输出直连编码器输入 Surface —— 零拷贝的关键一步
     scErr = OH_AVScreenCapture_StartScreenCaptureWithSurface(capture_, encoderSurface_);
     if (scErr != AV_SCREEN_CAPTURE_ERR_OK) {
         ReleaseCapture();
-        ReleaseCodec();
         return STAGE_START_CAPTURE_FAILED;
     }
     captureStarted_.store(true);
-    running_.store(true);
+    LOGI("screen capture started with surface");
+    return STAGE_OK;
+}
 
-    LOGI("pipeline up: %{public}dx%{public}d@%{public}d bitrate=%{public}d",
-         params_.width, params_.height, params_.frameRate, params_.bitrate);
+// ---------------------------------------------------------------------------
+// 采集策略：关闭"启动后统一弹 Picker"，让采集在无人工确认的前提下长期存活
+// ---------------------------------------------------------------------------
+void ScreenEncoder::ApplyCaptureStrategyLocked() {
+    if (capture_ == nullptr) {
+        return;
+    }
+
+    OH_AVScreenCapture_CaptureStrategy *strategy = OH_AVScreenCapture_CreateCaptureStrategy();
+    if (strategy == nullptr) {
+        // 设备/版本不支持策略接口（@since 20）：退化为系统默认行为，只是会弹框。
+        LOGW("CreateCaptureStrategy failed, fallback to default picker behavior");
+        return;
+    }
+
+    // ① 不弹 Picker —— 本方案的核心诉求。
+    //    注意语义：false = "启动后不需要弹 Picker"，即由应用自行承担授权合法性；
+    //    true = 统一在启动后弹；不设置 = 走系统推荐行为（当前系统会弹）。
+    OH_AVSCREEN_CAPTURE_ErrCode err =
+        OH_AVScreenCapture_StrategyForPickerPopUp(strategy, false);
+    if (err != AV_SCREEN_CAPTURE_ERR_OK) {
+        LOGW("StrategyForPickerPopUp(false) failed: %{public}d", static_cast<int32_t>(err));
+    }
+
+    // ② 通话中继续采集（默认 false）。CarLife 场景下手机常伴随车机蓝牙通话，
+    //    若中途被掐断会直接表现成"投屏掉线"，因此显式打开。
+    err = OH_AVScreenCapture_StrategyForKeepCaptureDuringCall(strategy, true);
+    if (err != AV_SCREEN_CAPTURE_ERR_OK) {
+        LOGW("StrategyForKeepCaptureDuringCall(true) failed: %{public}d", static_cast<int32_t>(err));
+    }
+
+    // ③ 旋转跟随：车机横屏、手机可能竖屏启动。开启后虚拟屏尺寸随系统旋转自动调整，
+    //    不必再手动调 ResizeCanvas，避免出现画面拉伸/黑边。
+    err = OH_AVScreenCapture_StrategyForCanvasFollowRotation(strategy, true);
+    if (err != AV_SCREEN_CAPTURE_ERR_OK) {
+        LOGW("StrategyForCanvasFollowRotation(true) failed: %{public}d", static_cast<int32_t>(err));
+    }
+
+    err = OH_AVScreenCapture_SetCaptureStrategy(capture_, strategy);
+    if (err != AV_SCREEN_CAPTURE_ERR_OK) {
+        LOGE("SetCaptureStrategy failed: %{public}d", static_cast<int32_t>(err));
+    } else {
+        LOGI("capture strategy applied: pickerPopUp=false, keepDuringCall=true, followRotation=true");
+    }
+
+    // 策略对象被 Set 之后由 capture 内部持有/拷贝，此处即可释放。
+    OH_AVScreenCapture_ReleaseCaptureStrategy(strategy);
+}
+
+int32_t ScreenEncoder::RestartCapture() {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (codec_ == nullptr || encoderSurface_ == nullptr) {
+        // 编码器已经不在了，单靠重启采集救不回来
+        return STAGE_START_CAPTURE_FAILED;
+    }
+
+    // 防抖：重建采集会强制换掉编码器 Surface，车机侧要等下一个 I 帧才能恢复画面，
+    // 因此短时间内重复重启只会让画面反复花屏/卡顿。
+    // 这里做一次冷却，冷却期内直接返回成功（假装已恢复），让上层不必再重试。
+    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (lastRestartMs_ != 0 && nowMs - lastRestartMs_ < kRestartCooldownMs) {
+        LOGI("restart requested within cooldown (%{public}lld ms), skipped",
+             static_cast<long long>(nowMs - lastRestartMs_));
+        return STAGE_OK;
+    }
+
+    LOGI("restarting screen capture (codec kept alive)");
     if (onLog_) {
-        onLog_("采集与编码管线已启动");
+        onLog_("正在重新建立屏幕采集...");
+    }
+    ReleaseCapture();
+    int32_t stage = StartCaptureLocked();
+    if (stage != STAGE_OK) {
+        LOGE("restart capture failed at stage %{public}d", stage);
+        running_.store(false);
+        return stage;
+    }
+    lastRestartMs_ = nowMs;
+    // 恢复后立刻补一个 I 帧，让车机侧不用等 GOP
+    forceKeyFrame_.store(true);
+    running_.store(true);
+    if (onLog_) {
+        onLog_("屏幕采集已恢复");
     }
     return STAGE_OK;
 }
@@ -384,6 +547,40 @@ void ScreenEncoder::RequestKeyFrame() {
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_REQUEST_I_FRAME, 1);
     OH_VideoEncoder_SetParameter(codec_, format);
     OH_AVFormat_Destroy(format);
+}
+
+int32_t ScreenEncoder::SetFrameRate(int32_t frameRate) {
+    if (frameRate <= 0) {
+        return -1;
+    }
+    std::lock_guard<std::mutex> guard(lock_);
+    if (codec_ == nullptr || !codecStarted_.load()) {
+        return -1;
+    }
+    if (frameRate == params_.frameRate) {
+        return 0;   // 无变化，避免无谓的 SetParameter
+    }
+
+    OH_AVFormat *format = OH_AVFormat_Create();
+    if (format == nullptr) {
+        return -1;
+    }
+    OH_AVFormat_SetIntValue(format, OH_MD_KEY_FRAME_RATE, frameRate);
+    OH_AVErrCode err = OH_VideoEncoder_SetParameter(codec_, format);
+    OH_AVFormat_Destroy(format);
+
+    if (err != AV_ERR_OK) {
+        LOGE("SetFrameRate(%{public}d) failed: %{public}d", frameRate, static_cast<int32_t>(err));
+        return -1;
+    }
+
+    // 同步更新采集侧上限，否则采集仍会按旧帧率出帧。
+    if (capture_ != nullptr) {
+        OH_AVScreenCapture_SetMaxVideoFrameRate(capture_, frameRate);
+    }
+    params_.frameRate = frameRate;
+    LOGI("frame rate changed to %{public}d (pipeline kept alive)", frameRate);
+    return 0;
 }
 
 } // namespace carhi

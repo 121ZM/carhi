@@ -44,6 +44,10 @@ HomeGameDebug.p7b
 Thumbs.db
 *.swp
 
-# ---------------- AI 工作记忆（内部记录，不入公开库）----------------
-.workbuddy-ai/
+# ---------------- AI 工作记忆 ----------------
+# 整体忽略，但保留 memory 目录（含协议逆向结论、进展日志、长期备忘录）。
+# 换机器继续开发时需要它，因此显式放行。
+.workbuddy-ai/*
+!.workbuddy-ai/memory/
+!.workbuddy-ai/memory/**
 .commit-msg.txt

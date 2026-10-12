@@ -17,12 +17,28 @@
 set -euo pipefail
 
 # ---------------- 路径配置 ----------------
+# 优先用环境变量 CLT_HOME 指定的 Command Line Tools / DevEco Studio 安装目录。
+# 未指定时按序探测本机已知位置（DevEco Studio 已内置 hvigor / node / SDK）。
+if [ -z "${CLT_HOME:-}" ]; then
+  for candidate in \
+      "/d/dev/Huawei/DevEco Studio" \
+      "D:/dev/Huawei/DevEco Studio" \
+      "/d/dev/DevEco Studio" \
+      "D:/dev/DevEco Studio" \
+      "E:/AITools/command-line-tools" ; do
+    if [ -f "$candidate/tools/hvigor/bin/hvigorw.js" ] || [ -f "$candidate/hvigor/bin/hvigorw.js" ]; then
+      CLT_HOME="$candidate"
+      break
+    fi
+  done
+fi
 CLT_HOME="${CLT_HOME:-E:/AITools/command-line-tools}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../harmony" && pwd)"
 
-# JDK：未显式指定时，尝试本机已知位置
+# JDK：未显式指定时，依次尝试 DevEco 自带 jbr 与本机常见 JDK 位置
 if [ -z "${JAVA_HOME:-}" ]; then
   for candidate in \
+      "$CLT_HOME/jbr" \
       "C:/Users/dev/.jdks/jbr_dcevm-11.0.16" \
       "C:/Program Files/Java/jdk-17" \
       "C:/Program Files/Java/jdk-11" ; do
@@ -38,8 +54,20 @@ if [ -z "${JAVA_HOME:-}" ]; then
 fi
 
 # ---------------- 环境变量 ----------------
-export DEVECO_SDK_HOME="$CLT_HOME/sdk"
-export DEVECO_NODE_HOME="$CLT_HOME/tool/node"
+# DevEco Studio 布局：SDK 在 <root>/sdk，node 在 <root>/tools/node，
+# hvigor 在 <root>/tools/hvigor；Command Line Tools 布局则少一层 tools/。
+if [ -d "$CLT_HOME/tools/node" ]; then
+  DEVECO_NODE_HOME="$CLT_HOME/tools/node"
+  HVIGORW_JS="$CLT_HOME/tools/hvigor/bin/hvigorw.js"
+else
+  DEVECO_NODE_HOME="$CLT_HOME/tool/node"
+  HVIGORW_JS="$CLT_HOME/hvigor/bin/hvigorw.js"
+fi
+
+if [ -d "$CLT_HOME/sdk" ]; then
+  export DEVECO_SDK_HOME="$CLT_HOME/sdk"
+fi
+export DEVECO_NODE_HOME
 export NODE_HOME="$DEVECO_NODE_HOME"
 export JAVA_HOME
 
@@ -54,11 +82,10 @@ export PATH="$JAVA_BIN:$PATH"
 
 NODE_EXE="$DEVECO_NODE_HOME/node.exe"
 [ -x "$NODE_EXE" ] || NODE_EXE="$DEVECO_NODE_HOME/node"
-HVIGORW_JS="$CLT_HOME/hvigor/bin/hvigorw.js"
 
 if [ ! -f "$HVIGORW_JS" ]; then
   echo "ERROR: 找不到 hvigor 入口: $HVIGORW_JS" >&2
-  echo "       请用 CLT_HOME 指定 Command Line Tools 根目录。" >&2
+  echo "       请用 CLT_HOME 指定 DevEco Studio / Command Line Tools 根目录。" >&2
   exit 1
 fi
 
