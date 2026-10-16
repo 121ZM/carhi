@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>CarHi · Native 自绘桌面 版式预览（1280×720）</title>
+<style>
+  :root{
+    --bg-base:#0A0C10; --bg-surface:#141821; --bg-elevated:#1E2430;
+    --accent:#2E9BFF; --accent-dim:#1A3A5C;
+    --fg1:#FFFFFF; --fg2:#C3CBD9; --fg3:#7C879B;
+    --border:#232A36;
+    --font-sans:"HarmonyOS Sans SC","HarmonyOS Sans","Noto Sans SC",
+                "Source Han Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{background:#05070A;}
+  body{font-family:var(--font-sans);color:#E6EDF3;padding:32px 28px 48px;}
+  .head{max-width:1280px;margin:0 auto 20px;}
+  .head h1{font-size:20px;font-weight:700;}
+  .head p{font-size:13px;color:#8B949E;margin-top:6px;line-height:1.6;}
+  .head code{color:#7EE0B8;font-family:ui-monospace,Consolas,monospace;font-size:12px;}
+  .stage{max-width:1280px;margin:0 auto 34px;}
+  .label{font-size:14px;color:#C3CBD9;margin:0 0 10px 2px;}
+  .label b{color:#2E9BFF;}
+  .screen{width:1280px;height:720px;border-radius:16px;overflow:hidden;
+    box-shadow:0 18px 60px rgba(0,0,0,.65),0 0 0 1px #1B2230;display:block;}
+  svg{display:block;}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>CarHi · Native 自绘桌面 · 版式预览</h1>
+  <p>
+    这不是设计稿，是 <code>cpp/hmi_renderer.cpp</code> <b>绘制代码的 1:1 版式</b>：
+    同一套坐标常量、同一套调色板（<code>kRailW=76 / kMidW=296 / kPad=18</code>）。
+    用于在没有真机时复核「native 实际会画出什么」。真机出图待设备接上后核对。
+  </p>
+</div>
+
+<!-- ================= 稿 1 · 首页 ================= -->
+<div class="stage">
+  <div class="label">① 首页 —— 左图标栏 + 中列（导航卡 / 音频卡）+ 右侧纯地图</div>
+  <svg class="screen" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1280" height="720" fill="#0A0C10"/>
+
+    <!-- 左侧图标栏 -->
+    <rect x="0" y="0" width="76" height="720" fill="#0A0C10"/>
+    <line x1="75.5" y1="0" x2="75.5" y2="720" stroke="#232A36" stroke-width="1"/>
+    <!-- 首页（激活） -->
+    <rect x="16" y="18" width="44" height="44" rx="12" fill="#1A3A5C"/>
+    <g transform="translate(25,27) scale(1.0833)" fill="none" stroke="#2E9BFF" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.5 11.2 L12 3.6 L20.5 11.2"/>
+      <path d="M5.4 10.2 L5.4 20.2 L18.6 20.2 L18.6 10.2"/>
+      <path d="M9.8 20.2 L9.8 14.6 L14.2 14.6 L14.2 20.2"/>
+    </g>
+    <!-- 导航 -->
+    <path d="M38 82.3 L47.8 101.3 L38 96.9 L28.3 101.3 Z" fill="#7C879B"/>
+    <!-- 设置（贴底） -->
+    <g transform="translate(25,667) scale(1.0833)" fill="none" stroke="#7C879B" stroke-width="2"
+       stroke-linecap="round">
+      <circle cx="12" cy="12" r="3.6"/>
+      <path d="M12 2.4 V4.9 M12 19.1 V21.6 M2.4 12 H4.9 M19.1 12 H21.6
+               M5.2 5.2 L7 7 M17 17 L18.8 18.8 M18.8 5.2 L17 7 M7 17 L5.2 18.8"/>
+    </g>
+
+    <!-- 中列 · 导航转向卡 -->
+    <rect x="94" y="18" width="260" height="370" rx="22" fill="#141821" stroke="#232A36"/>
+    <circle cx="150" cy="132" r="40" fill="#2E9BFF" opacity="0.12"/>
+    <circle cx="150" cy="132" r="34" fill="#1A3A5C"/>
+    <g transform="translate(124,106) scale(2.1667)" fill="none" stroke="#2E9BFF" stroke-width="3"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7.6 20.6 L7.6 11.0 Q7.6 7.2 11.6 7.2 L18.0 7.2"/>
+      <path d="M17.4 3.0 L23.4 7.2 L17.4 11.4 Z" fill="#2E9BFF" stroke="none"/>
+    </g>
+    <text x="200" y="132" fill="#FFFFFF" font-size="50" font-weight="700">300</text>
+    <text x="292" y="124" fill="#C3CBD9" font-size="24" font-weight="500">m</text>
+    <text x="200" y="184" fill="#FFFFFF" font-size="24" font-weight="700">科技路</text>
+    <text x="116" y="210" fill="#C3CBD9" font-size="19">前方路口右转</text>
+    <text x="116" y="232" fill="#C3CBD9" font-size="19">进入科技路</text>
+    <line x1="116" y1="270" x2="332" y2="270" stroke="#232A36"/>
+    <g transform="translate(116,282) scale(0.9167)" fill="none" stroke="#7C879B" stroke-width="3"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 20 L7 10.5 Q7 7 10.5 7 L16.5 7"/>
+      <path d="M16 3.2 L21.5 7 L16 10.8 Z" fill="#7C879B" stroke="none"/>
+    </g>
+    <text x="148" y="298" fill="#7C879B" font-size="16">然后 直行 1.2 km</text>
+
+    <!-- 中列 · 音频迷你卡 -->
+    <rect x="94" y="406" width="260" height="296" rx="22" fill="#141821" stroke="#232A36"/>
+    <rect x="116" y="466" width="56" height="56" rx="12" fill="#1E2430" stroke="#232A36"/>
+    <g transform="translate(126,476)" fill="none" stroke="#2E9BFF">
+      <circle cx="18" cy="18" r="13.5" stroke-width="1.8" opacity="0.55"/>
+      <circle cx="18" cy="18" r="4.8" fill="#2E9BFF" stroke="none" opacity="0.85"/>
+    </g>
+    <text x="186" y="488" fill="#FFFFFF" font-size="22" font-weight="700">夜航</text>
+    <text x="186" y="512" fill="#C3CBD9" font-size="15">林深 · Midnight Drive</text>
+    <rect x="116" y="538" width="216" height="5" rx="2.5" fill="#1E2430"/>
+    <rect x="116" y="538" width="78" height="5" rx="2.5" fill="#2E9BFF"/>
+    <text x="116" y="562" fill="#7C879B" font-size="13">1:24</text>
+    <text x="332" y="562" fill="#7C879B" font-size="13" text-anchor="end">3:58</text>
+    <rect x="130" y="576" width="44" height="44" rx="22" fill="#1E2430" stroke="#232A36"/>
+    <g transform="translate(140,586)" fill="#FFFFFF">
+      <path d="M19 5 L7.4 12 L19 19 Z"/><rect x="4.2" y="5" width="2.6" height="14" rx="1.3"/>
+    </g>
+    <circle cx="224" cy="598" r="28" fill="#2E9BFF"/>
+    <path d="M216 586 L236 598 L216 610 Z" fill="#06131F"/>
+    <rect x="274" y="576" width="44" height="44" rx="22" fill="#1E2430" stroke="#232A36"/>
+    <g transform="translate(284,586)" fill="#FFFFFF">
+      <path d="M5 5 L16.6 12 L5 19 Z"/><rect x="17.2" y="5" width="2.6" height="14" rx="1.3"/>
+    </g>
+
+    <!-- 右侧地图（纯地图，零浮层） -->
+    <g>
+      <rect x="372" y="0" width="908" height="720" fill="#0E1219"/>
+      <g stroke="#161C26" stroke-width="2">
+        <line x1="372" y1="96"  x2="1280" y2="96"/>
+        <line x1="372" y1="214" x2="1280" y2="214"/>
+        <line x1="372" y1="332" x2="1280" y2="332"/>
+        <line x1="372" y1="450" x2="1280" y2="450"/>
+        <line x1="372" y1="568" x2="1280" y2="568"/>
+        <line x1="542" y1="0" x2="542" y2="720"/>
+        <line x1="692" y1="0" x2="692" y2="720"/>
+        <line x1="842" y1="0" x2="842" y2="720"/>
+        <line x1="992" y1="0" x2="992" y2="720"/>
+        <line x1="1142" y1="0" x2="1142" y2="720"/>
+      </g>
+      <g stroke="#1D2531" stroke-width="5">
+        <line x1="372" y1="360" x2="1280" y2="360"/>
+        <line x1="826" y1="0" x2="826" y2="720"/>
+      </g>
+      <path d="M432 640 L602 640 L602 470 L802 470 L802 300 L1072 300 L1072 166 L1232 166"
+            fill="none" stroke="#14304C" stroke-width="20"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M432 640 L602 640 L602 470 L802 470 L802 300 L1072 300 L1072 166 L1232 166"
+            fill="none" stroke="#2E9BFF" stroke-width="8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="1232" cy="166" r="20" fill="#2E9BFF" opacity="0.20"/>
+      <circle cx="1232" cy="166" r="9" fill="#2E9BFF"/>
+      <circle cx="802" cy="470" r="24" fill="#2E9BFF" opacity="0.20"/>
+      <circle cx="802" cy="470" r="11" fill="#FFFFFF"/>
+      <circle cx="802" cy="470" r="11" fill="none" stroke="#2E9BFF" stroke-width="4"/>
+    </g>
+  </svg>
+</div>
+
+<!-- ================= 稿 2 · 导航页 ================= -->
+<div class="stage">
+  <div class="label">② 导航页 —— 左图标栏 + <b>纯地图</b>（零浮层，无时间 / 无行程卡 / 无 FAB）</div>
+  <svg class="screen" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1280" height="720" fill="#0A0C10"/>
+
+    <!-- 左侧图标栏 -->
+    <rect x="0" y="0" width="76" height="720" fill="#0A0C10"/>
+    <line x1="75.5" y1="0" x2="75.5" y2="720" stroke="#232A36" stroke-width="1"/>
+    <g transform="translate(25,27) scale(1.0833)" fill="none" stroke="#7C879B" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.5 11.2 L12 3.6 L20.5 11.2"/>
+      <path d="M5.4 10.2 L5.4 20.2 L18.6 20.2 L18.6 10.2"/>
+      <path d="M9.8 20.2 L9.8 14.6 L14.2 14.6 L14.2 20.2"/>
+    </g>
+    <!-- 导航（激活） -->
+    <rect x="16" y="70" width="44" height="44" rx="12" fill="#1A3A5C"/>
+    <path d="M38 82.3 L47.8 101.3 L38 96.9 L28.3 101.3 Z" fill="#2E9BFF"/>
+    <g transform="translate(25,667) scale(1.0833)" fill="none" stroke="#7C879B" stroke-width="2"
+       stroke-linecap="round">
+      <circle cx="12" cy="12" r="3.6"/>
+      <path d="M12 2.4 V4.9 M12 19.1 V21.6 M2.4 12 H4.9 M19.1 12 H21.6
+               M5.2 5.2 L7 7 M17 17 L18.8 18.8 M18.8 5.2 L17 7 M7 17 L5.2 18.8"/>
+    </g>
+
+    <!-- 地图铺满剩余（1204×720，u = 1204/908 ≈ 1.326） -->
+    <g>
+      <rect x="76" y="0" width="1204" height="720" fill="#0E1219"/>
+      <g stroke="#161C26" stroke-width="2">
+        <line x1="76" y1="96"  x2="1280" y2="96"/>
+        <line x1="76" y1="214" x2="1280" y2="214"/>
+        <line x1="76" y1="332" x2="1280" y2="332"/>
+        <line x1="76" y1="450" x2="1280" y2="450"/>
+        <line x1="76" y1="568" x2="1280" y2="568"/>
+        <line x1="276" y1="0" x2="276" y2="720"/>
+        <line x1="475" y1="0" x2="475" y2="720"/>
+        <line x1="674" y1="0" x2="674" y2="720"/>
+        <line x1="873" y1="0" x2="873" y2="720"/>
+        <line x1="1072" y1="0" x2="1072" y2="720"/>
+      </g>
+      <g stroke="#1D2531" stroke-width="5">
+        <line x1="76" y1="360" x2="1280" y2="360"/>
+        <line x1="678" y1="0" x2="678" y2="720"/>
+      </g>
+      <path d="M156 640 L381 640 L381 470 L646 470 L646 300 L1004 300 L1004 166 L1216 166"
+            fill="none" stroke="#14304C" stroke-width="26"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M156 640 L381 640 L381 470 L646 470 L646 300 L1004 300 L1004 166 L1216 166"
+            fill="none" stroke="#2E9BFF" stroke-width="11"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="1216" cy="166" r="26" fill="#2E9BFF" opacity="0.20"/>
+      <circle cx="1216" cy="166" r="12" fill="#2E9BFF"/>
+      <circle cx="646" cy="470" r="32" fill="#2E9BFF" opacity="0.20"/>
+      <circle cx="646" cy="470" r="15" fill="#FFFFFF"/>
+      <circle cx="646" cy="470" r="15" fill="none" stroke="#2E9BFF" stroke-width="5"/>
+    </g>
+  </svg>
+</div>
+
+</body>
+</html>

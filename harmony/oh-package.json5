@@ -1,8 +1,13 @@
 {
   "modelVersion": "26.0.0",
   "description": "CarLife 手机端（HarmonyOS）",
-  "dependencies": {},
+  "dependencies": {
+    "@amap/amap_lbs_navi": "11.2.1",
+    "@amap/amap_lbs_common": "11.2.1",
+    "@amap/amap_lbs_location": "11.2.1"
+  },
   "devDependencies": {
     "@ohos/hypium": "1.0.19"
-  }
+  },
+  "dynamicDependencies": {}
 }

@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CarHi · 车机导航界面 静态视觉稿（Nav / Audio · 1920×720）</title>
+<!--
+  ============================================================================
+  CarHi — 车机导航界面（Nav-HMI）静态高保真视觉稿
+  设计系统：Tech Utility 视觉方向（综合 Linear / Vercel / Supabase 深色基因）
+              + 汽车 HMI 领域约束（见 DESIGN.md v1.0）
+  ----------------------------------------------------------------------------
+  本文件为「静态视觉稿」：无业务 JS、无交互逻辑。
+  两块画布严格 1920×720，并排展示（缩放由外层 scale 完成，内部尺寸不变）。
+  全部尺寸均按 DESIGN.md 的设计值以 px 书写，字号永不随容器缩小。
+  ============================================================================
+-->
+<style>
+/* ==========================================================================
+   1. 设计令牌（Design Tokens）— 直接粘贴自 DESIGN.md §9
+   ========================================================================== */
+:root {
+  /* ---- 背景层级 ---- */
+  --bg-base: #0A0C10;
+  --bg-surface: #141821;
+  --bg-elevated: #1E2430;
+  --bg-elevated-hover: #28303F;
+  --bg-map: #0E1219;
+
+  /* ---- 前景层级 ---- */
+  --fg-primary: #FFFFFF;
+  --fg-secondary: #C3CBD9;
+  --fg-tertiary: #7C879B;
+  --fg-disabled: #4A5364;
+  --fg-on-accent: #06131F;
+
+  /* ---- 强调色 ---- */
+  --accent: #2E9BFF;
+  --accent-hover: #4FB0FF;
+  --accent-active: #1C7FE0;
+  --accent-dim: #1A3A5C;
+  --accent-glow: rgba(46,155,255,0.18);
+
+  /* ---- 语义色 ---- */
+  --success: #34D399;
+  --warning: #F5B942;
+  --danger: #FF5A5A;
+  --info: #5AA9FF;
+
+  /* ---- 描边 ---- */
+  --border-subtle: #232A36;
+  --border-strong: #333D4D;
+
+  /* ---- 字体 ---- */
+  --font-sans: "HarmonyOS Sans SC","HarmonyOS Sans","Noto Sans SC",
+               "Source Han Sans SC","PingFang SC","Microsoft YaHei",
+               system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-tnum: "HarmonyOS Sans SC","DIN Alternate","Roboto Mono",
+               ui-monospace,"SF Mono",Consolas,monospace;
+
+  /* ---- 字阶 ---- */
+  --type-mega: 120px; --type-display: 72px; --type-h1: 48px;
+  --type-h2: 40px;    --type-h3: 32px;      --type-body: 32px;
+  --type-body-sm: 28px; --type-label: 26px; --type-caption: 24px;
+
+  /* ---- 间距 ---- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-8: 48px; --space-10: 64px;
+  --space-12: 96px;
+
+  /* ---- 圆角 ---- */
+  --radius-sm: 8px; --radius-md: 16px; --radius-lg: 24px;
+  --radius-xl: 32px; --radius-pill: 999px;
+
+  /* ---- 阴影 ---- */
+  --elev-1: 0 8px 32px rgba(0,0,0,0.45);
+  --elev-2: 0 12px 40px rgba(0,0,0,0.55);
+  --elev-accent: 0 8px 24px rgba(46,155,255,0.30);
+}
+
+/* ==========================================================================
+   2. 展示台（Showcase）— 仅用于并排摆放两块画布，不属于 HMI 本身
+   ========================================================================== */
+.showcase {
+  margin: 0;
+  padding: 56px 40px 72px;
+  background: #05070A;                /* 比画布更暗的"展台"底，与画布形成边界感 */
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 40px;
+}
+.showcase__head {
+  width: 100%;
+  max-width: 1968px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  font-family: var(--font-sans);
+}
+.showcase__title {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: #E8EDF6;
+}
+.showcase__meta {
+  font-size: 20px;
+  font-weight: 500;
+  color: #6B7688;
+  letter-spacing: .5px;
+}
+
+/* 两块画布并排容器：左右 0.5 缩放，使整排宽约 1920px */
+.stage {
+  display: flex;
+  align-items: flex-start;
+  gap: 64px;                          /* 两画布之间的间隙（缩放后视觉约 32px） */
+  transform: scale(0.5);
+  transform-origin: top center;
+  /* 缩放后腾出高度，避免底部留白过大 */
+  margin-bottom: -380px;
+}
+
+/* 画布外框 + 标注 */
+.canvas-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;                          /* 标注与画布间距（缩放后 10px） */
+}
+.canvas-frame__label {
+  font-family: var(--font-sans);
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: #8E99AC;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.canvas-frame__label b {
+  color: #D6DEEB;
+  font-weight: 700;
+}
+.canvas-frame__label span {
+  font-size: 26px;
+  font-weight: 500;
+  color: #5E6A7D;
+}
+
+/* 画布边界：一圈细边框，让 1920×720 的边界清楚可见 */
+.hmi-root {
+  position: relative;
+  width: 1920px;
+  height: 720px;
+  background: var(--bg-base);
+  font-family: var(--font-sans);
+  color: var(--fg-primary);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--border-strong), 0 24px 80px rgba(0,0,0,.7);
+}
+
+/* ==========================================================================
+   3. 通用：页签栏 / 状态条（两页共用）
+   ========================================================================== */
+
+/* 页签栏 —— 高 72px，横跨全宽，背景 --bg-base，下边缘 1px border-subtle */
+.tabbar {
+  position: absolute;
+  top: 0; left: 0;
+  width: 1920px; height: 72px;
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  padding-left: var(--space-8);
+  gap: var(--space-10);               /* 页签项间距 64px */
+  box-sizing: border-box;
+  z-index: 100;
+}
+.tabbar__item {
+  position: relative;
+  height: 72px;                       /* 点击热区全高 */
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--type-label);       /* 26px */
+  font-weight: 500;
+  letter-spacing: .5px;
+  color: var(--fg-tertiary);          /* 非激活 */
+}
+/* 激活态：--accent + 底部 4px 下划线 */
+.tabbar__item.is-active {
+  color: var(--accent);
+}
+.tabbar__item.is-active::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 4px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--accent);
+}
+
+/* 状态条 —— 底部，高 88px，背景 --bg-base，上边缘 1px border-subtle */
+.statusbar {
+  position: absolute;
+  left: 0; bottom: 0;
+  width: 1920px; height: 88px;
+  background: var(--bg-base);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-8);          /* 水平内边距 48px */
+  box-sizing: border-box;
+  z-index: 100;
+}
+/* 左侧：时间 40px/600 */
+.statusbar__clock {
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--type-h2);          /* 40px */
+  font-weight: 600;
+  color: var(--fg-primary);
+  line-height: 1;
+}
+/* 信息组：标签在上 + 值在下 */
+.statusbar__group {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-1);
+}
+.statusbar__group + .statusbar__group,
+.statusbar__clock + .statusbar__group {
+  margin-left: var(--space-10);       /* 组间距 64px */
+}
+.statusbar__label {
+  font-size: var(--type-label);       /* 26px */
+  font-weight: 500;
+  letter-spacing: .5px;
+  color: var(--fg-tertiary);
+  line-height: 1.1;
+}
+.statusbar__value {
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--type-body-sm);     /* 28px */
+  font-weight: 400;
+  color: var(--fg-secondary);
+  line-height: 1.15;
+}
+.statusbar__spacer { flex: 1; }
+/* 连接状态：10×10 圆点 + 文字 */
+.statusbar__conn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--type-label);       /* 26px */
+  font-weight: 500;
+  color: var(--success);
+  letter-spacing: .5px;
+}
+.statusbar__dot {
+  width: 10px; height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--success);
+}
+
+/* ==========================================================================
+   4. 导航页（Nav）
+   ========================================================================== */
+
+/* 4.1 主体区 —— 页签栏下、状态条上；左右安全边距 48px */
+.nav__body {
+  position: absolute;
+  top: 72px; left: 0;
+  width: 1920px;
+  height: 560px;                      /* 720 - 72 - 88 */
+  padding: var(--space-8);            /* 48px 边距 */
+  box-sizing: border-box;
+  display: flex;
+  gap: var(--space-10);               /* 焦点卡与地图之间 64px */
+}
+
+/* 4.2 转向指引卡片 —— 左栏 640px，唯一焦点
+   设计规范标称 640×460；此处锁定 460px 高，内容按"间距优先压缩、
+   字号绝不缩小"的原则适配（DESIGN.md §7） */
+.turn-card {
+  width: 640px;
+  flex: 0 0 640px;
+  height: 460px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);    /* 24px */
+  padding: var(--space-6);            /* 32px */
+  box-sizing: border-box;
+  box-shadow: var(--elev-2);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;            /* 内容整体垂直居中 */
+}
+
+/* 箭头图标容器 —— 规范标称 160px，为在 460px 卡高内保证
+   120px 数字与 48px 道路名完整可见，视觉稿收敛至 128px */
+.turn-card__icon {
+  width: 128px; height: 128px;
+  flex: 0 0 128px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-dim);
+  box-shadow: 0 0 40px var(--accent-glow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 距离行：数字 120px 与单位 48px baseline 对齐 */
+.turn-card__dist {
+  margin-top: var(--space-5);         /* 24px —— 卡高受限，间距让位于字号 */
+  display: flex;
+  align-items: baseline;              /* 基线对齐 */
+  gap: var(--space-2);                /* 8px */
+}
+.turn-card__num {
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--type-mega);        /* 120px */
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -2px;
+  color: var(--fg-primary);
+}
+.turn-card__unit {
+  font-size: var(--type-h1);          /* 48px */
+  font-weight: 600;
+  line-height: 1;
+  color: var(--fg-secondary);
+}
+
+/* 道路名 48px/700 */
+.turn-card__road {
+  margin-top: var(--space-3);         /* 12px —— 与距离行衔接 */
+  font-size: var(--type-h1);          /* 48px */
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--fg-primary);
+}
+/* 动作整句 32px/400 */
+.turn-card__action {
+  margin-top: var(--space-3);         /* 12px */
+  font-size: var(--type-body);        /* 32px */
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--fg-secondary);
+}
+
+/* 4.3 地图占位区 —— 自适应填满剩余宽度 */
+.map {
+  position: relative;
+  flex: 1 1 auto;
+  background: var(--bg-map);
+  border-radius: var(--radius-lg);    /* 24px */
+  overflow: hidden;                   /* 让线框被裁进圆角 */
+  box-shadow: var(--elev-1);
+}
+.map__svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* 地图右上角的指南针 / 比例尺（低亮度，仅建立空间感） */
+.map__compass {
+  position: absolute;
+  top: var(--space-5); right: var(--space-5);
+  width: 64px; height: 64px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.map__scale {
+  position: absolute;
+  left: var(--space-5); bottom: var(--space-5);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-tnum);
+  font-size: var(--type-caption);     /* 24px —— 绝对下限 */
+  font-weight: 500;
+  letter-spacing: .5px;
+  color: var(--fg-tertiary);
+}
+.map__scale-bar {
+  width: 96px; height: 10px;
+  border-left: 2px solid var(--fg-tertiary);
+  border-right: 2px solid var(--fg-tertiary);
+  border-bottom: 2px solid var(--fg-tertiary);
+}
+
+/* ==========================================================================
+   5. 音频页（Audio）
+   ========================================================================== */
+.audio__body {
+  position: absolute;
+  top: 72px; left: 0;
+  width: 1920px;
+  height: 560px;
+  padding: 40px var(--space-8);       /* 竖直 40px（略收于 48px，为垂直内容留白） */
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);               /* 96px —— 两块大区域之间 */
+}
+
+/* 5.1 左：专辑封面占位 360×360 圆角方形 */
+.audio__cover {
+  position: relative;
+  width: 360px; height: 360px;
+  flex: 0 0 360px;
+  border-radius: var(--radius-xl);    /* 32px */
+  background:
+    radial-gradient(120% 120% at 18% 12%, #24304080 0%, transparent 58%),
+    linear-gradient(150deg, var(--bg-elevated) 0%, #171C26 100%);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--elev-1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+/* 封面内低对比同心圆，暗示"唱片/音频"而不喧哗 */
+.audio__cover-ring {
+  position: absolute;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+}
+.audio__cover-ring--1 { width: 240px; height: 240px; opacity: .55; }
+.audio__cover-ring--2 { width: 300px; height: 300px; opacity: .30; }
+
+/* 5.2 右：曲目卡片 + 控制 + 进度 + 音量 */
+.audio__panel {
+  flex: 1 1 auto;
+  height: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);    /* 32px 大面板 */
+  padding: var(--space-5) var(--space-10);  /* 竖直 24px，为密集垂直内容腾空间 */
+  box-sizing: border-box;
+  box-shadow: var(--elev-1);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* 曲目名 48px/700 + 歌手名 32px/400 */
+.audio__title {
+  font-size: var(--type-h1);          /* 48px */
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--fg-primary);
+}
+.audio__artist {
+  margin-top: var(--space-3);         /* 12px */
+  font-size: var(--type-body);        /* 32px */
+  font-weight: 400;
+  line-height: 1.3;
+  color: var(--fg-secondary);
+}
+
+/* 播放控制：主按钮 144px + 次按钮 112px，间距 48px */
+.audio__controls {
+  margin-top: var(--space-6);         /* 32px */
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.btn {
+  border-radius: var(--radius-pill);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.btn--secondary {
+  width: 112px; height: 112px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+.btn--secondary:hover { background: var(--bg-elevated-hover); }
+.btn--primary {
+  width: 144px; height: 144px;
+  background: var(--accent);
+  box-shadow: var(--elev-accent);
+}
+.btn--primary:hover  { background: var(--accent-hover); }
+.btn--primary:active { background: var(--accent-active); }
+
+/* 进度条 + 时间 28px/500 */
+.audio__progress { margin-top: var(--space-6); }   /* 32px */
+.slider {
+  position: relative;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);     /* 剩余段 */
+}
+.slider__fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);          /* 已播段 */
+}
+.slider__thumb {
+  position: absolute;
+  top: 50%;
+  width: 32px; height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--fg-primary);
+  box-shadow: 0 4px 12px rgba(0,0,0,.5);
+  transform: translate(-50%, -50%);
+}
+.audio__times {
+  margin-top: var(--space-4);         /* 16px */
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--type-body-sm);     /* 28px */
+  font-weight: 500;
+  color: var(--fg-secondary);
+}
+
+/* 音量：图标 + 条 + 数值 32px/600 */
+.audio__volume {
+  margin-top: var(--space-5);         /* 24px */
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+.audio__volume-icon { display: flex; align-items: center; }
+.slider--volume { height: 16px; flex: 0 0 420px; }  /* 音量条更粗 16px */
+.audio__volume-value {
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--type-h3);          /* 32px */
+  font-weight: 600;
+  color: var(--fg-primary);
+  min-width: 68px;
+  text-align: right;
+}
+.audio__volume-icon--muted { color: var(--fg-secondary); }
+
+/* ==========================================================================
+   6. 页脚注释（仅展示台用）
+   ========================================================================== */
+.showcase__foot {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  line-height: 1.7;
+  color: #5E6A7D;
+  max-width: 1968px;
+  width: 100%;
+  letter-spacing: .3px;
+}
+.showcase__foot code {
+  font-family: var(--font-tnum);
+  color: #8E99AC;
+}
+</style>
+</head>
+<body>
+
+<main class="showcase">
+
+  <header class="showcase__head">
+    <h1 class="showcase__title">CarHi · 车机导航界面 — 静态视觉稿</h1>
+    <div class="showcase__meta">Canvas 1920 × 720 · 2.67:1 · Dark only · Tech Utility</div>
+  </header>
+
+  <div class="stage">
+
+    <!-- ===================================================================
+         画布 A — 导航页 Nav 1920×720
+         =================================================================== -->
+    <div class="canvas-frame">
+      <div class="canvas-frame__label">
+        <b>导航页</b><span>Nav · 1920 × 720</span>
+      </div>
+
+      <section class="hmi-root" aria-label="导航页 1920×720">
+
+        <!-- 页签栏：导航激活 -->
+        <nav class="tabbar" aria-label="顶部页签">
+          <span class="tabbar__item is-active">导航</span>
+          <span class="tabbar__item">音频</span>
+        </nav>
+
+        <!-- 主体 -->
+        <div class="nav__body">
+
+          <!-- 转向指引卡片（唯一焦点） -->
+          <article class="turn-card">
+
+            <!-- 箭头图标：白箭头压 accent-dim 圆底，唯一发光处 -->
+            <div class="turn-card__icon" aria-hidden="true">
+              <!-- 右转箭头：竖干起于底部并向右上弯，箭头指向右 -->
+              <svg width="82" height="82" viewBox="0 0 96 96" fill="none">
+                <!-- 蓝色描边层，强化"指引色"语义 -->
+                <path d="M34 82 V44 C34 36 40 30 48 30 H62"
+                      stroke="#2E9BFF" stroke-width="17"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+                <!-- 白色主体层 -->
+                <path d="M34 82 V44 C34 36 40 30 48 30 H62"
+                      stroke="#FFFFFF" stroke-width="12"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+                <!-- 箭头头（指向右） -->
+                <path d="M60 12 L86 30 L60 48 Z" fill="#FFFFFF"/>
+              </svg>
+            </div>
+
+            <!-- 距离数字 120px + 单位 48px（baseline 对齐） -->
+            <div class="turn-card__dist">
+              <span class="turn-card__num">300</span>
+              <span class="turn-card__unit">m</span>
+            </div>
+
+            <!-- 道路名 48px/700 -->
+            <h2 class="turn-card__road">科技路</h2>
+
+            <!-- 动作整句 32px/400 -->
+            <p class="turn-card__action">前方路口右转进入科技路</p>
+          </article>
+
+          <!-- 地图占位区 -->
+          <div class="map" role="img" aria-label="地图占位区：抽象路网、规划路线与自车位置">
+
+            <svg class="map__svg" viewBox="0 0 1100 512" preserveAspectRatio="none" aria-hidden="true">
+              <!-- 背景色块（绿地/水域感）：极低对比，仅暗示地块 -->
+              <rect x="700" y="40" width="330" height="200" rx="20"
+                    fill="#1E2430" opacity="0.45"/>
+              <rect x="120" y="300" width="280" height="170" rx="20"
+                    fill="#1E2430" opacity="0.35"/>
+
+              <!-- 主路：stroke 10px，--border-strong -->
+              <g stroke="#333D4D" stroke-width="10" fill="none" stroke-linecap="round">
+                <path d="M-20 360 H460"/>
+                <path d="M700 -20 V430"/>
+                <path d="M-20 150 H1120"/>
+              </g>
+
+              <!-- 次路：stroke 5px，--border-subtle -->
+              <g stroke="#232A36" stroke-width="5" fill="none" stroke-linecap="round">
+                <path d="M180 -20 V520"/>
+                <path d="M380 -20 V520"/>
+                <path d="M880 -20 V520"/>
+                <path d="M460 210 H1120"/>
+                <path d="M-20 250 H700"/>
+                <path d="M560 430 H1120"/>
+              </g>
+
+              <!-- 快速路/匝道斜线，增加路网真实感 -->
+              <g stroke="#232A36" stroke-width="5" fill="none" stroke-linecap="round">
+                <path d="M1080 470 L820 210"/>
+                <path d="M700 430 L560 290"/>
+              </g>
+
+              <!-- 规划路径：stroke 12px，--accent，圆头圆角，半透明
+                   自左下（屏幕外驶入）向右上延伸，终点落在自车位置 -->
+              <path d="M150 512 L150 360 L420 360 L420 150 L820 150 L870 150"
+                    stroke="#2E9BFF" stroke-width="12" fill="none"
+                    stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+
+              <!-- 自车位置：三角箭头 48px 边长，--accent 填充 + 白描边 3px -->
+              <!-- 外围光环：半径 64px，--accent-dim 半透明 -->
+              <circle cx="870" cy="150" r="64" fill="#1A3A5C" opacity="0.35"/>
+              <circle cx="870" cy="150" r="34" fill="#1A3A5C" opacity="0.55"/>
+              <g transform="translate(870,150) rotate(-90)">
+                <path d="M24 0 L-16 20 L-16 -20 Z"
+                      fill="#2E9BFF" stroke="#FFFFFF" stroke-width="3"
+                      stroke-linejoin="round"/>
+              </g>
+            </svg>
+
+            <!-- 指南针：北 -->
+            <div class="map__compass" aria-hidden="true">
+              <svg width="34" height="34" viewBox="0 0 34 34" fill="none">
+                <path d="M17 4 L23 28 L17 22 L11 28 Z" fill="#C3CBD9"/>
+              </svg>
+            </div>
+
+            <!-- 比例尺（24px，绝对下限字号） -->
+            <div class="map__scale">
+              <span class="map__scale-bar"></span>
+              <span>200 m</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 状态条 -->
+        <footer class="statusbar">
+          <span class="statusbar__clock">14:32</span>
+
+          <div class="statusbar__group">
+            <span class="statusbar__label">剩余</span>
+            <span class="statusbar__value">12.4 km</span>
+          </div>
+
+          <div class="statusbar__group">
+            <span class="statusbar__label">预计到达</span>
+            <span class="statusbar__value">14:47</span>
+          </div>
+
+          <span class="statusbar__spacer"></span>
+
+          <div class="statusbar__conn">
+            <span class="statusbar__dot"></span>
+            <span>已连接</span>
+          </div>
+        </footer>
+
+      </section>
+    </div>
+
+    <!-- ===================================================================
+         画布 B — 音频页 Audio 1920×720
+         =================================================================== -->
+    <div class="canvas-frame">
+      <div class="canvas-frame__label">
+        <b>音频页</b><span>Audio · 1920 × 720</span>
+      </div>
+
+      <section class="hmi-root" aria-label="音频页 1920×720">
+
+        <!-- 页签栏：音频激活 -->
+        <nav class="tabbar" aria-label="顶部页签">
+          <span class="tabbar__item">导航</span>
+          <span class="tabbar__item is-active">音频</span>
+        </nav>
+
+        <!-- 主体 -->
+        <div class="audio__body">
+
+          <!-- 左：专辑封面占位 360×360 -->
+          <div class="audio__cover" role="img" aria-label="专辑封面占位">
+            <span class="audio__cover-ring audio__cover-ring--2"></span>
+            <span class="audio__cover-ring audio__cover-ring--1"></span>
+            <!-- 音符图标（inline SVG，替代 emoji） -->
+            <svg width="120" height="120" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+              <path d="M78 18 V74 a18 18 0 1 1 -12 -17 V34 l-26 8 v46 a18 18 0 1 1 -12 -17 V30 z"
+                    fill="#3A4557"/>
+            </svg>
+          </div>
+
+          <!-- 右：曲目 + 控制 + 进度 + 音量 -->
+          <div class="audio__panel">
+
+            <h2 class="audio__title">夜航（Midnight Drive）</h2>
+            <p class="audio__artist">陈屿 &nbsp;·&nbsp; 专辑《城市弧光》</p>
+
+            <!-- 播放控制 -->
+            <div class="audio__controls">
+              <!-- 上一首 -->
+              <button class="btn btn--secondary" type="button" aria-label="上一首">
+                <svg width="46" height="46" viewBox="0 0 46 46" fill="none" aria-hidden="true">
+                  <path d="M33 8 L13 23 L33 38 Z" fill="#FFFFFF"/>
+                  <rect x="8" y="8" width="5" height="30" rx="2.5" fill="#FFFFFF"/>
+                </svg>
+              </button>
+
+              <!-- 播放 / 暂停（主按钮 144px，暂停图标 = 两条竖杠） -->
+              <button class="btn btn--primary" type="button" aria-label="播放或暂停">
+                <svg width="60" height="60" viewBox="0 0 60 60" fill="none" aria-hidden="true">
+                  <rect x="14" y="10" width="12" height="40" rx="4" fill="#06131F"/>
+                  <rect x="34" y="10" width="12" height="40" rx="4" fill="#06131F"/>
+                </svg>
+              </button>
+
+              <!-- 下一首 -->
+              <button class="btn btn--secondary" type="button" aria-label="下一首">
+                <svg width="46" height="46" viewBox="0 0 46 46" fill="none" aria-hidden="true">
+                  <path d="M13 8 L33 23 L13 38 Z" fill="#FFFFFF"/>
+                  <rect x="33" y="8" width="5" height="30" rx="2.5" fill="#FFFFFF"/>
+                </svg>
+              </button>
+            </div>
+
+            <!-- 播放进度 -->
+            <div class="audio__progress">
+              <div class="slider">
+                <span class="slider__fill" style="width: 35.3%;"></span>
+                <span class="slider__thumb" style="left: 35.3%;"></span>
+              </div>
+              <div class="audio__times">
+                <span>1:24</span>
+                <span>3:58</span>
+              </div>
+            </div>
+
+            <!-- 音量 -->
+            <div class="audio__volume">
+              <span class="audio__volume-icon audio__volume-icon--muted" aria-hidden="true">
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                  <path d="M6 15 H12 L21 7 V33 L12 25 H6 Z" fill="#C3CBD9"/>
+                  <path d="M26 14 C30 18 30 22 26 26" stroke="#C3CBD9"
+                        stroke-width="3.5" stroke-linecap="round"/>
+                  <path d="M31 9 C38 16 38 24 31 31" stroke="#C3CBD9"
+                        stroke-width="3.5" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <div class="slider slider--volume">
+                <span class="slider__fill" style="width: 60%;"></span>
+                <span class="slider__thumb" style="left: 60%;"></span>
+              </div>
+              <span class="audio__volume-value">60</span>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 状态条（音频页同样保留常驻状态信息） -->
+        <footer class="statusbar">
+          <span class="statusbar__clock">14:32</span>
+
+          <div class="statusbar__group">
+            <span class="statusbar__label">剩余</span>
+            <span class="statusbar__value">12.4 km</span>
+          </div>
+
+          <div class="statusbar__group">
+            <span class="statusbar__label">预计到达</span>
+            <span class="statusbar__value">14:47</span>
+          </div>
+
+          <span class="statusbar__spacer"></span>
+
+          <div class="statusbar__conn">
+            <span class="statusbar__dot"></span>
+            <span>已连接</span>
+          </div>
+        </footer>
+
+      </section>
+    </div>
+
+  </div>
+
+  <div class="showcase__foot">
+    设计系统：<code>Tech Utility</code> 方向 + 汽车 HMI 约束（DESIGN.md v1.0）·
+    全部尺寸以设计值 px 书写，外层 <code>scale(0.5)</code> 仅用于并排预览，画布内部严格 1920 × 720 ·
+    最小字号 24px（<code>--type-caption</code>）· 强调色 <code>#2E9BFF</code> 面积 &lt; 8%
+  </div>
+
+</main>
+
+</body>
+</html>

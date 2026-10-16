@@ -30,15 +30,12 @@
 #include <multimedia/player_framework/native_avformat.h>
 #include <multimedia/player_framework/native_avcodec_base.h>
 
-namespace carhi {
+// ★ 复用 canvas_encoder.h 里的公共类型（EncodedFrame / EncoderParams）。
+//   两者字段完全一致，各定义一份会在同时 include 时报 `redefinition`
+//   （2026-10-15 恢复录屏代码时踩到）。合并成一个定义是唯一合理做法。
+#include "canvas_encoder.h"
 
-/** 一帧编码产物（H.264 Annex-B 裸流，无容器封装） */
-struct EncodedFrame {
-    const uint8_t *data;
-    int32_t size;
-    int64_t pts;        // 微秒
-    bool keyFrame;
-};
+namespace carhi {
 
 /**
  * 采集中断的错误码约定（负值，与系统 errno 区分开）
@@ -58,15 +55,6 @@ enum CaptureInterrupt {
     INTERRUPT_BY_OTHER = -4,
     /** 底层采集错误 —— 可恢复（多数为临时性） */
     INTERRUPT_CAPTURE_ERROR = -5,
-};
-
-/** 编码参数 */
-struct EncoderParams {
-    int32_t width = 1280;
-    int32_t height = 720;
-    int32_t frameRate = 30;
-    int32_t bitrate = 4000000;   // bit/s
-    int32_t iFrameIntervalMs = 2000;
 };
 
 /**
@@ -140,6 +128,22 @@ private:
     // ---- 采集回调（静态，转实例方法） ----
     static void OnCaptureState(OH_AVScreenCapture *capture, OH_AVScreenCaptureStateCode stateCode, void *userData);
     static void OnCaptureError(OH_AVScreenCapture *capture, int32_t errorCode, void *userData);
+    /**
+     * ★ 采集数据回调（音频/视频 buffer 可用时触发）。
+     *
+     * 为什么要注册它：长时任务 `AUDIO_RECORDING` 的语义是"音频录制正在进行"。
+     * 若只配置参数、无人消费数据，系统可能判定"音频录制未进行"而**挂起任务**
+     * （SYSTEM_SUSPEND_AUDIO_RECORDING_NOT_RUNNING = 7）→ 任务挂起后应用一切到后台
+     * 就被冻结 → 采集与心跳全停 → 车机 5 秒超时断开（「投屏切应用掉线」）。
+     * 这里把内录音频真正消费掉，让任务名实相符。
+     *
+     * ⚠ 官方语义：注册本回调后，OH_AVScreenCapture_AcquireAudioBuffer /
+     * ReleaseAudioBuffer / AcquireVideoBuffer / ReleaseVideoBuffer 都会**返回失败**；
+     * buffer 由系统在回调返回后自动失效，**不需要也不允许手动释放**。
+     */
+    static void OnCaptureBufferAvailable(OH_AVScreenCapture *capture, OH_AVBuffer *buffer,
+                                         OH_AVScreenCaptureBufferType bufferType,
+                                         int64_t timestamp, void *userData);
 
     void HandleNewOutputBuffer(uint32_t index, OH_AVBuffer *buffer);
     void EmitError(int32_t code, const std::string &msg);
@@ -169,6 +173,13 @@ private:
     std::atomic<int32_t> encodedWidth_{0};
     std::atomic<int32_t> encodedHeight_{0};
     std::atomic<bool> forceKeyFrame_{false};
+
+    /** ★ 内录音频 buffer 计数 —— 证明"音频录制确实在进行"（长时任务保活的关键） */
+    std::atomic<uint64_t> audioInnerBuffers_{0};
+    /** 麦克风音频 buffer 计数（已关麦克风，正常应恒为 0） */
+    std::atomic<uint64_t> audioMicBuffers_{0};
+    /** 采集侧视频 buffer 计数（surface 模式下应恒为 0） */
+    std::atomic<uint64_t> videoBuffers_{0};
 
     EncoderParams params_{};
     FrameCallback onFrame_;

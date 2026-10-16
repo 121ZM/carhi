@@ -1,4 +1,4 @@
-# CarHi · 鸿蒙版 CarLife 手机端
+# autoCar · 鸿蒙版 CarLife 手机端
 
 在 **HarmonyOS NEXT** 上实现百度 CarLife **手机端**，向真实 CarLife 车机推送手机整屏画面。
 

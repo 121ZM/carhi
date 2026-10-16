@@ -178,7 +178,7 @@ OH_AVScreenCapture ──Surface──▶ OH_VideoEncoder ──H.264 NALU──
 
 | 参数 | 值 | 依据 |
 |---|---|---|
-| 分辨率 | 车机下发（默认 1280x720） | `CarlifeVideoEncoderInfo` |
+| 分辨率 | 车机下发（默认 **1920×720**） | `CarlifeVideoEncoderInfo`；默认值取自真机车机模式实际显示尺寸（2026-10-13 实测） |
 | 帧率 | 车机下发（默认 30） | 同上 |
 | 码率 | 按 `w*h*fps*0.1` 估算，夹在 1.5~20 Mbps | 经验值 |
 | Profile | Baseline | 老车机兼容性 |

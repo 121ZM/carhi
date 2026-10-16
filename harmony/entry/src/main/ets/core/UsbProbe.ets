@@ -17,15 +17,21 @@
  *       ③ 用 Core File Kit 的 read/write 在 fd 上收发，并自行解析字节流
  *     → 手机端需要**新增 USB 传输通道**（工作量较大）。
  *
- *   鸿蒙对此的能力（@ohos.usbManager，API 14+，本工程 API 26）：
- *     getAccessoryList() / hasAccessoryRight() / requestAccessoryRight()
+ *   鸿蒙对此的能力（@ohos.usbManager，API 14+，本工程 API 26，已对照 d.ts 核实）：
+ *     getAccessoryList() / hasAccessoryRight() / requestAccessoryRight() / cancelAccessoryRight()
  *     openAccessory() -> USBAccessoryHandle.accessoryFd / closeAccessory()
+ *     以上接口 **均无 @permission 标注**（不需要额外申请权限），
+ *     但 openAccessory 会抛 14400001（需先 requestAccessoryRight 拿授权）。
  *   另有一套 Host 侧接口（getDevices / connectDevice / bulkTransfer），用于手机当 Host 的场景。
  *
- * 本模块职责：**只诊断、不改链路**。
- *   插上 USB 后，它能告诉你「车机走了哪条路、手机有没有拿到 IP、配件有没有被识别」，
- *   从而决定后续是「零改造」还是「新增 USB 传输层」。
- *   诊断结果不影响既有 WiFi 功能。
+ * 本模块职责：
+ *   ① `probe()` —— **只诊断、不改链路**。插上 USB 后告诉你「车机走了哪条路、
+ *      手机有没有拿到 IP、配件有没有被识别」，从而决定后续是「零改造」还是「新增 USB 传输层」。
+ *   ② `tryAoa()` —— **真实试连**：真的 openAccessory() 拿 fd，并试读一段原始字节 dump 出来。
+ *      这是唯一能同时回答两件事的手段：
+ *        - 配件是真的存在，还是 getAccessoryList() 的假阳性（→ 决定要不要写传输层）
+ *        - AOA 单字节流上到底长什么样（TCP 模式靠 7 个端口区分通道，帧头里**没有通道号**；
+ *          USB 只有一条流，通道复用格式必须实测，不能猜）
  *
  * 为什么必须先诊断：路 A 与路 B 的实现量差一个数量级，猜错会白写一大块代码。
  *   历史上本项目就吃过「拿猜测当结论」的亏（曾误判 98316 为 PAUSE 导致周期性掉线）。
@@ -33,6 +39,7 @@
 
 import { usbManager, BusinessError } from '@kit.BasicServicesKit';
 import { connection } from '@kit.NetworkKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 
 const TAG = 'CarLifeUsbProbe';
 
@@ -61,6 +68,24 @@ export interface UsbProbeResult {
   accessories: string[];
   /** 诊断过程中的错误（非致命） */
   errors: string[];
+}
+
+/** AOA 真实试连结果 */
+export interface AoaProbeResult {
+  /** 配件列表非空 */
+  available: boolean;
+  /** 已获得配件访问权限（hasAccessoryRight 或 requestAccessoryRight 成功） */
+  granted: boolean;
+  /** 成功 openAccessory() */
+  opened: boolean;
+  /** accessoryFd（有效为正整数） */
+  fd: number;
+  /** 试读到的字节数；0 表示超时无数据 */
+  bytesRead: number;
+  /** 读到的前若干字节（hex + ASCII） */
+  hexDump: string;
+  /** 失败/异常原因（空串表示无错） */
+  error: string;
 }
 
 export class UsbProbe {
@@ -178,8 +203,89 @@ export class UsbProbe {
 
     const result: UsbProbeResult = { kind, summary, netIfaces, hostDevices, accessories, errors };
     UsbProbe.last = result;
-    console.info(`${TAG} probe kind=${kind} nets=${netIfaces.join('|')} acc=${accessories.length}`);
+    console.info(`${TAG} probe kind=${kind} nets=${netIfaces.join('|')}`
+      + ` host=${hostDevices.length} acc=${accessories.length}`
+      + ` accDetail=${accessories.join(';')} errors=${errors.join('|')}`);
     return result;
+  }
+
+  /**
+   * AOA **真实试连**：openAccessory() 拿 fd，并试读一段原始字节。
+   *
+   * 注意：这是**会改变状态**的操作（打开配件 / 可能弹授权框），
+   * 因此与只读的 probe() 分开。打开后无论成败都会立刻 closeAccessory()。
+   *
+   * 关键设计：试读用异步 `fs.read()`（返回 Promise，不阻塞 JS 线程），
+   * 再与一个超时 Promise 赛跑。若车机没在推数据，最多等 AOA_READ_WAIT_MS 就收手，
+   * 不会把界面卡死。
+   */
+  static async tryAoa(): Promise<AoaProbeResult> {
+    const res: AoaProbeResult = {
+      available: false, granted: false, opened: false,
+      fd: -1, bytesRead: 0, hexDump: '', error: ''
+    };
+    let handle: usbManager.USBAccessoryHandle | null = null;
+    try {
+      // ---- 1. 列配件 ----
+      const accs: Array<Readonly<usbManager.USBAccessory>> = usbManager.getAccessoryList();
+      if (accs === undefined || accs === null || accs.length === 0) {
+        res.error = '配件列表为空（车机未进入 AOA，或未插 USB）';
+        return res;
+      }
+      res.available = true;
+      const acc: Readonly<usbManager.USBAccessory> = accs[0];
+      console.info(`${TAG} aoa accessory manufacturer="${acc.manufacturer}"`
+        + ` product="${acc.product}" desc="${acc.description}"`
+        + ` ver="${acc.version}" sn="${acc.serialNumber}"`);
+
+      // ---- 2. 取访问授权 ----
+      let granted: boolean = usbManager.hasAccessoryRight(acc);
+      if (!granted) {
+        // 可能弹出系统授权框（com.usb.right），需用户点「允许」
+        granted = await usbManager.requestAccessoryRight(acc);
+      }
+      res.granted = granted;
+      if (!granted) {
+        res.error = '未获得配件访问权限（授权框被拒绝或超时）';
+        return res;
+      }
+
+      // ---- 3. 打开配件拿 fd ----
+      handle = usbManager.openAccessory(acc);
+      res.opened = true;
+      res.fd = handle.accessoryFd;
+      console.info(`${TAG} aoa opened accessoryFd=${res.fd}`);
+
+      // ---- 4. 试读原始字节 ----
+      // fs.read 是异步接口（libuv 线程池执行），不会卡住 JS 线程；
+      // 挂一个兜底 catch，避免超时后它才失败而变成"未处理的 Promise 拒绝"。
+      const buf = new ArrayBuffer(UsbProbe.AOA_READ_MAX);
+      const readP: Promise<number> = fs.read(res.fd, buf);
+      readP.then(() => {
+      }).catch(() => {
+      });
+      const racers: Array<Promise<number>> = [readP, UsbProbe.delay(UsbProbe.AOA_READ_WAIT_MS)];
+      const n: number = await Promise.race(racers);
+      if (n > 0) {
+        res.bytesRead = n;
+        res.hexDump = UsbProbe.hexDump(new Uint8Array(buf, 0, n));
+      }
+      console.info(`${TAG} aoa read n=${n} hex=${res.hexDump}`);
+    } catch (e) {
+      const err = e as BusinessError;
+      res.error = `code=${err.code} ${err.message}`;
+      console.error(`${TAG} aoa failed: ${res.error}`);
+    } finally {
+      if (handle !== null) {
+        try {
+          usbManager.closeAccessory(handle);
+          console.info(`${TAG} aoa closed accessoryFd=${res.fd}`);
+        } catch (e2) {
+          // 配件可能已被拔出，忽略
+        }
+      }
+    }
+    return res;
   }
 
   /** 把诊断结果拼成可读的多行文本（给日志/UI 用） */
@@ -193,5 +299,48 @@ export class UsbProbe {
       lines.push(`[USB诊断] 查询异常(${r.errors.length}): ${r.errors.join(' | ')}`);
     }
     return lines;
+  }
+
+  /** 把 AOA 试连结果拼成可读文本 */
+  static formatAoa(r: AoaProbeResult): string[] {
+    const lines: string[] = [];
+    lines.push(`[AOA试连] 配件存在=${r.available} 已授权=${r.granted} 已打开=${r.opened} fd=${r.fd}`);
+    if (r.opened) {
+      if (r.bytesRead > 0) {
+        lines.push(`[AOA试连] 读到达 ${r.bytesRead} 字节: ${r.hexDump}`);
+      } else {
+        lines.push('[AOA试连] fd 已打开但试读超时无数据（车机可能还没开始发）');
+      }
+    }
+    if (r.error !== '') {
+      lines.push(`[AOA试连] 失败: ${r.error}`);
+    }
+    return lines;
+  }
+
+  /** 试读上限字节数（只取头部，够看封包格式即可） */
+  private static readonly AOA_READ_MAX: number = 256;
+  /** 试读等待上限（毫秒），到点就收手，避免界面卡住 */
+  private static readonly AOA_READ_WAIT_MS: number = 1500;
+
+  /** 超时用的哨兵 Promise：到点返回 -1 */
+  private static delay(ms: number): Promise<number> {
+    return new Promise<number>((resolve: (v: number) => void) => {
+      setTimeout(() => resolve(-1), ms);
+    });
+  }
+
+  /** 把字节转成 "hex  |ascii|" 形式，便于人眼识别封包结构 */
+  private static hexDump(bytes: Uint8Array): string {
+    const limit: number = bytes.length < 96 ? bytes.length : 96;
+    const hex: string[] = [];
+    const ascii: string[] = [];
+    for (let i = 0; i < limit; i++) {
+      const b: number = bytes[i];
+      hex.push(b.toString(16).padStart(2, '0'));
+      ascii.push((b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.');
+    }
+    const suffix: string = bytes.length > limit ? ` ...(共 ${bytes.length} 字节)` : '';
+    return `${hex.join(' ')}  |${ascii.join('')}|${suffix}`;
   }
 }

@@ -1,24 +1,32 @@
 /**
- * CarLife 推流引擎
+ * CarLife 引擎（路线 A：自绘画面，不走录屏）
  *
- * 把传输层、握手状态机、采集编码串成完整链路。
+ * 把传输层、握手状态机串成完整链路。
  *
  * 数据流：
- *   车机 --(TCP 7240)--> 状态机握手 --> 车机确认(98313)
- *        --> NativeCodec 启动（OH_AVScreenCapture + OH_VideoEncoder）
- *        --> H.264 裸流
+ *   车机 --(TCP 7240)--> 状态机握手 --> 车机确认(98313) 开始推流
+ *        --> <画面来源> H.264 裸流
  *        --> packMessage(Channel2, 131073) --> 车机(8240)
  *
+ * ★ 2026-10-13 方向性重置：**彻底废弃录屏镜像方案**。
+ *   官方 CarLife 手机端不走录屏 —— 它自己写导航页面、自己渲染，把渲染结果
+ *   直接编码推给车机。录屏方案自带的四个死结（切后台中断采集、息屏中断、
+ *   横屏 VirtualDisplay 尺寸不匹配、每次都要用户点录屏授权）在官方方案里
+ *   全都不存在。已删除：NativeCodec / CaptureGate / KeepScreen /
+ *   ScreenSizeProbe / PipProbe / screen_encoder.cpp。
+ *
+ *   本文件现在只负责：协议握手 + 通道收发 + 心跳 + 统计 + 把「画面来源」
+ *   产出的 H.264 帧封包发往视频通道。**画面从哪里来由 route A 的画布层决定**
+ *   （待接入：自绘 Surface -> 编码器）。
+ *
  * 音频不在此引擎内：导航语音通过蓝牙 A2DP 独立输出，不占用 CarLife 协议通道。
- * 触控回传明确不做（本方案只推流）。
  */
 
 import { CarLifeChannelServer, ChannelServerListener } from '../transport/ChannelServer';
 import { CarLifeStateMachine, HandshakeState, StateMachineListener, VideoParams } from './StateMachine';
-import { NativeCodec } from './NativeCodec';
 import { BackgroundKeeper } from './BackgroundKeeper';
-import { CaptureGate, CaptureGrantState } from './CaptureGate';
 import { Message, packMessage } from '../protocol/Framing';
+import { CarlifeTouchAction } from '../protocol/Messages';
 import * as C from '../protocol/Constants';
 
 /** 引擎状态回调 */
@@ -27,23 +35,46 @@ export interface EngineListener {
   onLog: (text: string) => void;
   onChannelChange: (channel: number, connected: boolean) => void;
   onStats: (fps: number, kbps: number, frames: number) => void;
-  /**
-   * 即将弹出录屏授权框。
-   * 手机端系统强制弹框且不记忆授权，因此这里只是给 UI 一个"请点允许"的提示。
-   */
-  onGrantPrompt: () => void;
-  /**
-   * 授权受阻（用户拒绝 / 尝试用尽），需要用户手动点「重新授权」。
-   * @param reason 可读原因
-   */
-  onCaptureBlocked: (reason: string) => void;
 }
+
+/**
+ * 画面来源（视频帧生产者）的约定接口。
+ *
+ * 路线 A 里，画面由「自绘画布 + 编码器」产出。引擎不关心它是怎么画的、
+ * 用 GL 还是 ArkTS，只要求它按这个接口交付 H.264 裸流。这样引擎与
+ * 画面层解耦，将来换实现（GL 自绘 / XComponent / 别的）不用动引擎。
+ */
+export interface FrameSource {
+  /** 启动画面产出（成功返回 true） */
+  start(params: VideoParams, onFrame: (nalu: Uint8Array, pts: number, keyFrame: boolean) => void,
+        onError: (code: number, msg: string) => void): boolean;
+  /** 停止并释放资源（幂等） */
+  stop(): void;
+  /** 请求立刻产出一个 I 帧（车机刚连上时用） */
+  requestKeyFrame(): void;
+  /** 动态调整帧率（车机下发 98316 时调用） */
+  setFrameRate(frameRate: number): void;
+  /** 是否正在产出画面 */
+  readonly isRunning: boolean;
+}
+
+/**
+ * 画面来源工厂。
+ *
+ * 目前**未接入实现** —— 路线 A 的画布层还没写（这是下一步工作）。
+ * 在它落地之前，引擎会把「已收到车机启动指令、准备推流」这一步走到位，
+ * 但不产出任何画面帧；UI 上会明确提示这一点，避免误以为在推流。
+ *
+ * 接入时只需在这里返回一个实现了 FrameSource 的对象即可。
+ */
+export type FrameSourceFactory = () => FrameSource;
 
 export class CarLifeEngine {
   private server: CarLifeChannelServer | null = null;
   private sm: CarLifeStateMachine | null = null;
-  private codec: NativeCodec | null = null;
+  private source: FrameSource | null = null;
   private listener: EngineListener;
+  private frameSourceFactory: FrameSourceFactory | null = null;
   private streaming: boolean = false;
 
   // 统计
@@ -61,20 +92,20 @@ export class CarLifeEngine {
   /** 是否已就"心跳超时"告警过（避免每秒刷屏） */
   private heartbeatWarned: boolean = false;
 
-  // ---- 采集中断自动恢复 ----
-  /** 最近一次启动推流用的参数，恢复时复用 */
+  /** 最近一次启动推流用的参数 */
   private lastParams: VideoParams | null = null;
-  /** 连续重试计数，成功出帧后清零 */
-  private retryCount: number = 0;
-  /** 重试定时器句柄 */
-  private retryTimer: number = -1;
-  /** 重试上限：连续失败这么多次就放弃，避免死循环骚扰系统弹窗 */
-  private static readonly MAX_RETRY: number = 5;
-  /** 重试间隔（毫秒）。给系统留出恢复时间（如来电结束） */
-  private static readonly RETRY_DELAY_MS: number = 2000;
 
-  constructor(listener: EngineListener) {
+  constructor(listener: EngineListener, factory: FrameSourceFactory | null = null) {
     this.listener = listener;
+    this.frameSourceFactory = factory;
+  }
+
+  /**
+   * 注册/更换画面来源工厂（幂等）。
+   * 供 UI 层在拿到画布（如 XComponent 的 surfaceId）之后再接上编码器。
+   */
+  setFrameSourceFactory(factory: FrameSourceFactory | null): void {
+    this.frameSourceFactory = factory;
   }
 
   /** 启动全部服务 */
@@ -90,9 +121,9 @@ export class CarLifeEngine {
           // 控制通道建立即启动握手与心跳
           this.sm.start();
         }
-        if (channel === C.CHANNEL_VIDEO && this.codec !== null) {
+        if (channel === C.CHANNEL_VIDEO && this.source !== null) {
           // 车机刚接上视频通道，立刻补一个 I 帧，避免它等一个 GOP 才有画面
-          this.codec.requestKeyFrame();
+          this.source.requestKeyFrame();
         }
       },
       onChannelDisconnected: (channel: number) => {
@@ -122,6 +153,35 @@ export class CarLifeEngine {
           this.listener.onLog(`[视频通道] 收到车机消息 ID=${msg.serviceType} len=${msg.payload.length}`);
         }
       },
+      onOtherMessage: (channel: number, msg: Message) => {
+        // ★ AUDIO/TTS/VR/TOUCH/DATA 的入站数据。此前 ChannelServer 里没有分支，
+        //   这些包**读进来就被丢掉** —— 其中 TOUCH(9340, Ch6) 是车机→手机的
+        //   触控通道（CarlifeTouchAction 425985 等）。
+        //
+        //   ★ 路线 A 的重大变化：自绘方案里，触控**终于有用了**！
+        //     官方就是这么做的：车机把点击坐标发过来，手机端用它来操作自己画的 UI
+        //     （点导航按钮、拖地图）。**不需要系统级输入注入权限** —— 因为那个 UI
+        //     是我们自己画的，直接改自己的状态就行。
+        //     这就是为什么官方能"点得动"而录屏方案点不动。
+        if (channel === C.CHANNEL_TOUCH && msg.serviceType === C.MSG_TOUCH_ACTION) {
+          const t: CarlifeTouchAction = CarlifeTouchAction.decode(msg.payload);
+          this.listener.onLog(`[触控] ← TOUCH_ACTION action=${t.action}`
+            + ` x=${t.x} y=${t.y} pointer=(${t.pointerx},${t.pointery})`);
+          // TODO(route A)：把触控坐标投给自绘画布，驱动导航/控件的交互。
+          return;
+        }
+        let hex: string = '';
+        const n: number = Math.min(16, msg.payload.length);
+        for (let i = 0; i < n; i++) {
+          hex += msg.payload[i].toString(16).padStart(2, '0');
+          if (i !== n - 1) {
+            hex += ' ';
+          }
+        }
+        this.listener.onLog(`[通道${channel}] ← ${C.msgName(msg.serviceType)}`
+          + ` (ID=${msg.serviceType}, len=${msg.payload.length})`
+          + (hex !== '' ? ` hex=${hex}` : ''));
+      },
       onError: (channel: number, err: string) => {
         this.listener.onLog(`通道 ${channel} 错误: ${err}`);
       }
@@ -138,22 +198,20 @@ export class CarLifeEngine {
         this.listener.onLog(text);
       },
       onVideoStart: (params: VideoParams) => {
-        this.startStreaming(params).catch((e: Error) => {
-          this.listener.onLog(`启动推流失败: ${e.message}`);
-        });
+        this.startStreaming(params);
       },
       onVideoPause: () => {
-        // 车机暂停推流：停掉编码/采集即可，**不要**断开端口监听或控制通道。
+        // 车机暂停推流：停掉画面产出即可，**不要**断开端口监听或控制通道。
         // 官方做法是 pauseFromHeadUnit()，串流可随时恢复；若在此拆掉连接，
         // 车机侧会认为手机掉线，需要重新握手。
         this.stopStreaming();
       },
       onFrameRateChange: (frameRate: number) => {
-        // 只调编码器帧率，管线保持存活。失败也不影响推流（沿用原帧率）。
-        const codec = this.codec;
-        if (codec !== null && codec.isRunning) {
-          codec.setFrameRate(frameRate);
-          this.listener.onLog(`[编码] 帧率已调整为 ${frameRate}fps（管线未重启）`);
+        // 只调帧率，画面管线保持存活。失败也不影响推流（沿用原帧率）。
+        const src = this.source;
+        if (src !== null && src.isRunning) {
+          src.setFrameRate(frameRate);
+          this.listener.onLog(`[画面] 帧率已调整为 ${frameRate}fps（管线未重启）`);
         }
       },
       sendCommand: async (serviceType: number, payload: Uint8Array) => {
@@ -168,13 +226,23 @@ export class CarLifeEngine {
     this.sm = new CarLifeStateMachine(smListener);
 
     // ---------- 3. 启动监听 ----------
+    // ⚠ 这里**必须按真实结果**说话。
+    //   `server.start()` 内部是逐端口 try/catch —— 某个端口绑失败**不会抛出来**。
+    //   原来无条件打印「已在 ... 端口监听」，于是 7 个端口全部绑定失败时
+    //   界面照样显示「已监听」，是个会骗人的假通过（2026-10-13 排查时踩到）。
     await this.server.start();
-    this.listener.onLog('已在 7240/8240/9240/9241/9242/9340/9440 端口监听，等待车机连接');
+    const listenRes: string[] = this.server.listenResults;
+    const okPorts: number = this.server.listeningCount;
+    if (listenRes.length > 0 && okPorts === listenRes.length) {
+      this.listener.onLog('已在 7240/8240/9240/9241/9242/9340/9440 端口监听，等待车机连接');
+    } else {
+      this.listener.onLog(`⚠ 端口监听不完整（${okPorts}/${listenRes.length}）：${listenRes.join('  ')}`);
+    }
 
     // ---------- 3.5 立即申请长时任务 ----------
-    // 改为「服务启动即持有」：长时任务覆盖整个应用生命周期，
-    // 这样即使还没车机连接、或推流中途用户切到别的 App，
-    // 监听与保活都不会被系统冻结。代价是启动后会有常驻通知（可点通知回到本应用）。
+    // 服务启动即持有：长时任务覆盖整个应用生命周期，这样即使还没车机连接、
+    // 或推流中途用户切到别的 App，监听与保活都不会被系统冻结。
+    // 代价是启动后会有常驻通知（可点通知回到本应用）。
     const kept = await BackgroundKeeper.acquire();
     if (kept.ok) {
       this.listener.onLog(`长时任务已生效（${kept.mode}）`);
@@ -205,147 +273,56 @@ export class CarLifeEngine {
     }, 1000);
   }
 
-  /** 启动屏幕采集与推流 */
-  private async startStreaming(params: VideoParams): Promise<void> {
+  /**
+   * 启动画面产出与推流。
+   *
+   * ★ 与录屏方案的区别：这里**没有录屏授权、没有常亮、没有采集中断恢复**。
+   *   画面来源是我们自己渲染的，不受系统采集管线约束，切后台/息屏/旋转
+   *   都不会打断它（前提：长时任务保持）。
+   */
+  private startStreaming(params: VideoParams): void {
     if (this.streaming) {
       return;
     }
     this.lastParams = params;
 
-    // 录屏授权门控：手机端启动采集时系统**必定**弹隐私保护授权框，
-    // 应用无法记忆授权。这里只在配额内主动弹（见 CaptureGate 注释），
-    // 避免"车机重连 / 采集中断重试"把授权框反复弹出来骚扰用户。
-    if (!CaptureGate.tryLaunch()) {
-      this.listener.onLog(`[授权] ${CaptureGate.label}，已停止自动启动采集。`
-        + '请点界面上的「重新授权」按钮后再试。');
-      this.listener.onCaptureBlocked(CaptureGate.label);
+    const factory = this.frameSourceFactory;
+    if (factory === null) {
+      // 画布层尚未接入（路线 A 的下一步工作）。明确说出来，不要让 UI 误以为在推流。
+      this.listener.onLog('⚠ 画面来源尚未接入：协议已就绪，但暂不会产生画面。'
+        + '（路线 A 的自绘画布层待实现）');
       return;
     }
-    if (CaptureGate.current !== CaptureGrantState.GRANTED) {
-      this.listener.onLog('[授权] 即将弹出系统录屏授权框，请在弹框中点「允许」，否则推流无法开始');
-      this.listener.onGrantPrompt();
-    }
 
-    // 长时任务已在 start() 阶段申请并持有（幂等，此处只是兜底补申请）。
-    if (!BackgroundKeeper.isActive) {
-      const kept = await BackgroundKeeper.acquire();
-      if (!kept.ok) {
-        this.listener.onLog(`警告: ${kept.reason}`);
-        this.listener.onLog('提示: 切到后台后推流可能被系统中断，请保持本应用在前台或锁屏外');
-      }
-    }
-
-    this.codec = new NativeCodec();
-    try {
-      this.codec.start(params, {
-        onFrame: (nalu: Uint8Array, pts: number, keyFrame: boolean) => {
-          this.retryCount = 0;   // 出帧即视为健康，清零重试计数
-          CaptureGate.markGranted();   // 出帧 = 用户已允许录屏
-          this.onEncodedFrame(nalu, pts);
-        },
-        onError: (code: number, msg: string) => {
-          this.handleCodecError(code, msg);
-        },
-        onLog: (text: string) => {
-          this.listener.onLog(text);
+    const src = factory();
+    if (!src.start(params,
+      (nalu: Uint8Array, pts: number, keyFrame: boolean) => {
+        this.onEncodedFrame(nalu, pts);
+      },
+      (code: number, msg: string) => {
+        // ★ 第二道防线（2026-10-15 真机两次踩坑，两条都兜住）：
+        //   1) code === 0 不是错误（AV_ERR_OK），编码器正常出帧时可能回调 onError(0)；
+        //   2) code 若不是 number（真机实测出现过 ArrayBuffer），说明帧回调被错绑到
+        //      错误回调上了（CallFrameJs 的 (ArrayBuffer, pts) 两个参数串进来），
+        //      这时收到的其实是**正常的编码帧**，更不能拆管线。
+        //   任何一条命中都只记日志、不 stopStreaming —— 拆管线 = 车机黑屏。
+        if (typeof code !== 'number') {
+          this.listener.onLog(`[画面] 忽略非数字错误码（疑似帧回调错绑）: ${typeof code}`);
+          return;
         }
-      });
-    } catch (e) {
-      const err = e as Error;
-      this.listener.onLog(`[编码] 启动失败: ${err.message}`);
-      this.codec = null;
-      // 启动失败大多是 STAGE_START_CAPTURE_FAILED（用户在授权框点了取消）。
-      CaptureGate.markFailed();
-      if (CaptureGate.needsUserAction) {
-        this.listener.onLog(`[授权] ${CaptureGate.label} —— 已停止自动重试，`
-          + '请在界面上点「重新授权」并允许录屏');
-        this.listener.onCaptureBlocked(CaptureGate.label);
-      }
+        if (code === 0) {
+          return;
+        }
+        this.listener.onLog(`[画面] 错误(${code}): ${msg}`);
+        this.stopStreaming();
+      })) {
+      this.listener.onLog('[画面] 启动失败');
       return;
     }
 
+    this.source = src;
     this.streaming = true;
-  }
-
-  /**
-   * 编码/采集中断的统一入口。
-   *
-   * 关键分支：
-   *   可恢复（切后台/来电/被抢占） -> 延迟重试重建采集，不放弃整车机连接。
-   *   不可恢复（用户主动取消/停止） -> 停流，避免反复弹授权框骚扰用户。
-   */
-  private handleCodecError(code: number, msg: string): void {
-    this.listener.onLog(`[编码] 错误(${code}): ${msg}`);
-
-    if (!NativeCodec.isRecoverable(code)) {
-      this.listener.onLog('[编码] 属于用户主动停止，不再重试');
-      this.stopStreaming();
-      return;
-    }
-
-    // 授权受阻时绝不进入自动重试 —— 每重试一次就会再弹一次授权框，
-    // 是对用户最直接的骚扰来源。此处直接停下，等用户手动恢复。
-    if (CaptureGate.needsUserAction) {
-      this.listener.onLog(`[授权] ${CaptureGate.label}，停止自动重试以避免反复弹框`);
-      this.stopStreaming();
-      this.listener.onCaptureBlocked(CaptureGate.label);
-      return;
-    }
-
-    if (this.retryCount >= CarLifeEngine.MAX_RETRY) {
-      this.listener.onLog(`[编码] 已连续重试 ${this.retryCount} 次仍失败，停止推流`);
-      this.stopStreaming();
-      return;
-    }
-
-    this.retryCount++;
-    this.listener.onLog(`[编码] 检测到可恢复中断，${CarLifeEngine.RETRY_DELAY_MS / 1000}s 后重试`
-      + `（第 ${this.retryCount}/${CarLifeEngine.MAX_RETRY} 次）`);
-    this.scheduleRetry();
-  }
-
-  /** 安排一次采集重启 */
-  private scheduleRetry(): void {
-    if (this.retryTimer !== -1) {
-      return;   // 已有待执行的重试，避免叠加
-    }
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = -1;
-      this.attemptRecover();
-    }, CarLifeEngine.RETRY_DELAY_MS);
-  }
-
-  /** 执行恢复：优先"只重启采集"，失败再退化到"整体重启" */
-  private attemptRecover(): void {
-    if (!this.streaming) {
-      return;
-    }
-    const codec = this.codec;
-
-    // 路径 1：编码器还活着 —— 只重建采集，最快
-    if (codec !== null && codec.isRunning) {
-      if (codec.restartCapture()) {
-        return;
-      }
-    }
-
-    // 路径 2：整条管线已失效 —— 完整重启
-    this.listener.onLog('[编码] 局部恢复失败，尝试重启整条采集编码管线');
-    if (codec !== null) {
-      codec.stop();
-    }
-    this.codec = null;
-    const params = this.lastParams;
-    if (params === null) {
-      this.stopStreaming();
-      return;
-    }
-    // 借用 streaming 标志位做一次完整重启（先复位再走标准启动流程）
-    this.streaming = false;
-    this.startStreaming(params).catch((e: Error) => {
-      this.listener.onLog(`[编码] 重启异常: ${e.message}`);
-      this.stopStreaming();
-    });
+    this.listener.onLog(`[画面] 已开始产出（${params.width}x${params.height} @ ${params.frameRate}fps）`);
   }
 
   /** 编码产物回调：封包后发往视频通道 */
@@ -369,18 +346,42 @@ export class CarLifeEngine {
 
   /** 停止推流 */
   private stopStreaming(): void {
-    if (this.retryTimer !== -1) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = -1;
-    }
-    this.retryCount = 0;
     if (!this.streaming) {
       return;
     }
     this.streaming = false;
-    this.codec?.stop();
-    this.codec = null;
+    this.source?.stop();
+    this.source = null;
     this.listener.onLog('推流已停止');
+  }
+
+  /**
+   * ★ 运行时切换画面源（自绘 ⇄ 应用投屏）。
+   *
+   * 用于「应用投屏」开关：工厂 `frameSourceFactory()` 会返回当前生效的源，
+   * 所以这里**先停掉现有画面管线、再按同一套参数重启** —— 新源即可接管。
+   *
+   * ★ 为什么要"停掉再重启"而不是热替换：
+   *   两种源都独占硬件编码器（`startHmi` 与 `startCapture` 是两套编码器实例），
+   *   同时存在会互相抢资源。走一次完整的 stop→start 最稳。
+   *
+   * @returns true = 已切换（或当前无车机连接、无管线可切）
+   */
+  switchFrameSource(): boolean {
+    const params = this.lastParams;
+    if (params === null) {
+      // 车机还没下发过启动指令 —— 没有管线在跑，无需切换。
+      // 下次车机启动推流时，工厂会自然取到新的源。
+      this.listener.onLog('[画面源] 暂无推流管线（车机未连接），切换将在下次启动时生效');
+      return false;
+    }
+    this.listener.onLog('[画面源] 正在切换画面源（停旧管线 → 按原参数重启）…');
+    this.stopStreaming();
+    // 稍等一拍再起，给编码器/采集器释放资源的时间（避免抢占）
+    setTimeout(() => {
+      this.startStreaming(params);
+    }, 300);
+    return true;
   }
 
   /** 停止全部 */
@@ -395,27 +396,5 @@ export class CarLifeEngine {
     this.server = null;
     this.sm = null;
     BackgroundKeeper.release();
-  }
-
-  /**
-   * 用户手动「重新授权」：清空授权门控配额后重新启动采集。
-   * 会再次弹出系统录屏授权框 —— 这是唯一一次由用户主动触发的弹框。
-   */
-  retryCapture(): void {
-    CaptureGate.reset();
-    this.listener.onLog('[授权] 已重置授权状态，即将重新弹出录屏授权框，请点「允许」');
-    const params = this.lastParams;
-    if (params === null) {
-      this.listener.onLog('[授权] 尚无车机下发的视频参数，请等车机连接后再试');
-      return;
-    }
-    if (this.streaming) {
-      // 采集仍在跑，无需重启
-      this.listener.onLog('[授权] 采集运行中，无需重新授权');
-      return;
-    }
-    this.startStreaming(params).catch((e: Error) => {
-      this.listener.onLog(`[授权] 重启采集异常: ${e.message}`);
-    });
   }
 }

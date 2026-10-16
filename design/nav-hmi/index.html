@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>CarHi HMI 视觉稿 v5 · 单页布局</title>
+<style>
+  :root{
+    --bg-base:#0A0C10;
+    --bg-surface:#141821;
+    --bg-elevated:#1E2430;
+    --accent:#2E9BFF;
+    --accent-dim:#1A3A5C;
+    --accent-glow:rgba(46,155,255,0.18);
+    --fg-primary:#FFFFFF;
+    --fg-secondary:#C3CBD9;
+    --fg-tertiary:#7C879B;
+    --fg-on-accent:#06131F;
+    --success:#34D399;
+    --border-subtle:#232A36;
+    --font-sans:"HarmonyOS Sans SC","HarmonyOS Sans","Noto Sans SC",
+                "Source Han Sans SC","PingFang SC","Microsoft YaHei",
+                system-ui,-apple-system,"Segoe UI",sans-serif;
+    --font-tnum:"HarmonyOS Sans SC","DIN Alternate","Roboto Mono",
+                ui-monospace,"SF Mono",Consolas,monospace;
+    --radius-sm:8px;
+    --radius-md:16px;
+    --radius-lg:24px;
+    --radius-pill:999px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{background:#05070A;}
+  body{font-family:var(--font-sans);color:var(--fg-primary);
+    padding:48px 40px 64px;-webkit-font-smoothing:antialiased;}
+
+  .sheet-head{max-width:1920px;margin:0 auto 28px;padding-left:4px;
+    display:flex;align-items:baseline;gap:20px;}
+  .sheet-head h1{font-size:26px;font-weight:700;color:#E6EDF3;}
+  .sheet-head .meta{font-size:15px;color:#6E7681;}
+  .sheet-head .badge{margin-left:auto;font-size:13px;color:#8B949E;
+    background:#141821;border:1px solid #232A36;padding:5px 14px;border-radius:999px;}
+
+  .stage{max-width:1920px;margin:0 auto;}
+  .stage-label{display:flex;align-items:baseline;gap:14px;margin:0 0 14px 4px;}
+  .stage-label .idx{font-size:14px;font-weight:700;color:var(--fg-on-accent);
+    background:var(--accent);border-radius:999px;width:26px;height:26px;
+    line-height:26px;text-align:center;display:inline-block;}
+  .stage-label .name{font-size:19px;font-weight:600;color:#D6DEE8;}
+  .stage-label .note{font-size:14px;color:#6E7681;}
+
+  .screen{
+    width:1920px;height:720px;
+    background:var(--bg-base);
+    border-radius:20px;overflow:hidden;position:relative;
+    box-shadow:0 24px 80px rgba(0,0,0,.7),0 0 0 1px #1B2230;
+    display:flex;
+  }
+
+  /* =====================================================
+     ① 左侧窄导航栏（112px）
+     ===================================================== */
+  .navbar{
+    flex:0 0 112px;height:100%;
+    background:rgba(10,12,16,.92);
+    border-right:1px solid var(--border-subtle);
+    display:flex;flex-direction:column;align-items:center;
+    padding:28px 0;
+    z-index:12;
+  }
+  .navbtn{
+    width:88px;height:88px;border-radius:var(--radius-md);
+    display:flex;align-items:center;justify-content:center;
+    position:relative;color:var(--fg-tertiary);
+  }
+  .navbtn svg{width:42px;height:42px;display:block;}
+  .navbtn.on{color:var(--accent);background:var(--accent-dim);}
+  .navbtn.on::before{content:"";position:absolute;left:-20px;top:22px;bottom:22px;
+    width:5px;background:var(--accent);border-radius:var(--radius-pill);}
+  .navbar .spacer{flex:1;}
+  /* 设置：最后一个，自然贴底 */
+
+  /* =====================================================
+     ② 中列（440px）：上=导航转向卡，下=音频迷你卡
+     ===================================================== */
+  .midcol{
+    flex:0 0 440px;height:100%;
+    display:flex;flex-direction:column;
+    padding:28px;gap:28px;
+    z-index:8;
+  }
+
+  /* --- 上卡：导航转向 --- */
+  .navcard{
+    flex:1.25;
+    background:var(--bg-surface);
+    border:1px solid var(--border-subtle);
+    border-radius:var(--radius-lg);
+    padding:32px;
+    display:flex;flex-direction:column;justify-content:center;
+    box-shadow:0 12px 40px rgba(0,0,0,.55);
+  }
+  .navcard .head{display:flex;align-items:center;gap:24px;margin-bottom:20px;}
+  .turn-icon{
+    width:112px;height:112px;flex:0 0 112px;border-radius:999px;
+    background:var(--accent-dim);
+    box-shadow:0 0 36px var(--accent-glow);
+    display:flex;align-items:center;justify-content:center;
+  }
+  .turn-icon svg{width:62px;height:62px;display:block;}
+  .turn-dist{display:flex;align-items:baseline;gap:6px;}
+  .turn-dist .num{
+    font-family:var(--font-tnum);font-variant-numeric:tabular-nums;
+    font-size:88px;font-weight:700;line-height:1;letter-spacing:-1.5px;
+    color:var(--fg-primary);
+  }
+  .turn-dist .unit{font-size:38px;font-weight:600;color:var(--fg-secondary);}
+  .turn-road{font-size:38px;font-weight:700;color:var(--fg-primary);line-height:1.2;}
+  .navcard .hint{font-size:28px;font-weight:400;color:var(--fg-secondary);line-height:1.4;}
+  .navcard .next{
+    margin-top:20px;padding-top:16px;border-top:1px solid var(--border-subtle);
+    display:flex;align-items:center;gap:14px;
+  }
+  .navcard .next svg{width:32px;height:32px;flex:0 0 32px;display:block;}
+  .navcard .next .tx{font-size:24px;font-weight:400;color:var(--fg-tertiary);}
+
+  /* --- 下卡：音频迷你卡（常驻，非独立页） --- */
+  .audiocard{
+    flex:1;
+    background:var(--bg-surface);
+    border:1px solid var(--border-subtle);
+    border-radius:var(--radius-lg);
+    padding:32px;
+    display:flex;flex-direction:column;justify-content:center;gap:22px;
+    box-shadow:0 12px 40px rgba(0,0,0,.55);
+  }
+  .audio-top{display:flex;align-items:center;gap:20px;}
+  .mini-cover{
+    width:96px;height:96px;flex:0 0 96px;border-radius:var(--radius-md);
+    background:linear-gradient(145deg,#1B2637 0%,#111722 100%);
+    border:1px solid var(--border-subtle);
+    display:flex;align-items:center;justify-content:center;
+  }
+  .mini-cover svg{width:52px;height:52px;display:block;}
+  .track-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;}
+  .track-name{
+    font-size:34px;font-weight:700;color:var(--fg-primary);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .track-artist{font-size:24px;font-weight:400;color:var(--fg-secondary);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+  .audio-prog{height:8px;border-radius:var(--radius-pill);
+    background:var(--bg-elevated);position:relative;overflow:hidden;}
+  .audio-prog .played{position:absolute;left:0;top:0;bottom:0;width:36%;
+    background:var(--accent);border-radius:var(--radius-pill);}
+  .audio-time{display:flex;justify-content:space-between;
+    font-family:var(--font-tnum);font-variant-numeric:tabular-nums;
+    font-size:22px;font-weight:500;color:var(--fg-tertiary);}
+
+  .audio-ctrl{display:flex;align-items:center;justify-content:center;gap:36px;}
+  .abtn{border-radius:var(--radius-pill);display:flex;align-items:center;
+    justify-content:center;background:var(--bg-elevated);
+    border:1px solid var(--border-subtle);}
+  .abtn.small{width:88px;height:88px;}
+  .abtn.big{width:112px;height:112px;background:var(--accent);border:none;
+    box-shadow:0 8px 24px rgba(46,155,255,.30);}
+  .abtn.small svg{width:40px;height:40px;}
+  .abtn.big svg{width:52px;height:52px;}
+
+  /* =====================================================
+     ③ 右侧大地图（铺满剩余空间）
+     ===================================================== */
+  .maparea{
+    flex:1;min-width:0;position:relative;
+    background:#0E1219;
+  }
+  .maparea svg.mapbg{position:absolute;inset:0;width:100%;height:100%;display:block;}
+  /* 地图区不承载任何浮层：首页与导航页的右侧都是纯地图 */
+</style>
+</head>
+<body>
+
+<div class="sheet-head">
+  <h1>CarHi · 车机 HMI 视觉稿</h1>
+  <span class="meta">1920×720 · 单页布局 · 音频为常驻卡片（非独立页）</span>
+  <span class="badge">v5 · Nav + Audio Card</span>
+</div>
+
+<div class="stage">
+  <div class="stage-label">
+    <span class="idx">1</span>
+    <span class="name">首页</span>
+    <span class="note">左侧导航栏（首页激活）· 中列：上=导航卡 / 下=音频卡 · 右侧纯地图，无浮层</span>
+  </div>
+
+  <div class="screen">
+
+    <!-- ============ ① 左侧窄导航栏（仅图标） ============ -->
+    <div class="navbar">
+      <!-- 首页（当前激活） -->
+      <div class="navbtn on">
+        <svg viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 19 L21 6 L36 19 V35 a2 2 0 0 1-2 2 H8 a2 2 0 0 1-2-2 Z"
+                stroke="currentColor" stroke-width="3.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M16 37 V25 h10 v12" stroke="currentColor" stroke-width="3.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <!-- 导航 -->
+      <div class="navbtn">
+        <svg viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M21 5 L37 37 L21 29.5 L5 37 Z" fill="currentColor"/>
+        </svg>
+      </div>
+
+      <div class="spacer"></div>
+
+      <!-- 设置（贴底，仅图标） -->
+      <div class="navbtn">
+        <svg viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="21" cy="21" r="6" stroke="currentColor" stroke-width="3.5"/>
+          <path d="M21 4 v5 M21 33 v5 M4 21 h5 M33 21 h5
+                   M9 9 l3.5 3.5 M29.5 29.5 L33 33 M33 9 l-3.5 3.5 M12.5 29.5 L9 33"
+                stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- ============ ② 中列：上导航卡 + 下音频卡 ============ -->
+    <div class="midcol">
+
+      <!-- 上卡：导航转向 -->
+      <div class="navcard">
+        <div class="head">
+          <div class="turn-icon">
+            <svg viewBox="0 0 62 62" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M21 54 V28 a10 10 0 0 1 10-10 h14"
+                    stroke="#2E9BFF" stroke-width="7"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M37 6 L54 18 L37 30 Z" fill="#2E9BFF"/>
+            </svg>
+          </div>
+          <div>
+            <div class="turn-dist"><span class="num">300</span><span class="unit">m</span></div>
+            <div class="turn-road">科技路</div>
+          </div>
+        </div>
+        <div class="hint">前方路口右转进入科技路</div>
+        <div class="next">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M11 27 V14 a6 6 0 0 1 6-6 h5"
+                  stroke="#7C879B" stroke-width="3.5"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M20 2 L29 8 L20 14 Z" fill="#7C879B"/>
+          </svg>
+          <span class="tx">然后 直行 1.2 km</span>
+        </div>
+      </div>
+
+      <!-- 下卡：音频迷你卡（常驻） -->
+      <div class="audiocard">
+        <div class="audio-top">
+          <div class="mini-cover">
+            <svg viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="26" cy="26" r="20" stroke="#2E9BFF" stroke-width="3" opacity="0.55"/>
+              <circle cx="26" cy="26" r="7" fill="#2E9BFF" opacity="0.85"/>
+            </svg>
+          </div>
+          <div class="track-info">
+            <div class="track-name">夜航</div>
+            <div class="track-artist">林深 · Midnight Drive</div>
+          </div>
+        </div>
+
+        <div class="audio-prog"><div class="played"></div></div>
+        <div class="audio-time"><span>1:24</span><span>3:58</span></div>
+
+        <div class="audio-ctrl">
+          <div class="abtn small">
+            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M11 9 V31" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round"/>
+              <path d="M31 9 L13 20 L31 31 Z" fill="#FFFFFF"/>
+            </svg>
+          </div>
+          <div class="abtn big">
+            <svg viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M18 12 L40 26 L18 40 Z" fill="#06131F"/>
+            </svg>
+          </div>
+          <div class="abtn small">
+            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M29 9 V31" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round"/>
+              <path d="M9 9 L27 20 L9 31 Z" fill="#FFFFFF"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ ③ 右侧大地图 ============ -->
+    <div class="maparea">
+      <svg class="mapbg" viewBox="0 0 1368 720" preserveAspectRatio="none"
+           xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="mapbg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%"  stop-color="#0E1219"/>
+            <stop offset="100%" stop-color="#0A0D14"/>
+          </linearGradient>
+        </defs>
+        <rect width="1368" height="720" fill="url(#mapbg)"/>
+
+        <!-- 次级路网 -->
+        <g stroke="#161C26" stroke-width="3">
+          <line x1="0" y1="96"  x2="1368" y2="96"/>
+          <line x1="0" y1="214" x2="1368" y2="214"/>
+          <line x1="0" y1="332" x2="1368" y2="332"/>
+          <line x1="0" y1="450" x2="1368" y2="450"/>
+          <line x1="0" y1="568" x2="1368" y2="568"/>
+          <line x1="170" y1="0" x2="170" y2="720"/>
+          <line x1="400" y1="0" x2="400" y2="720"/>
+          <line x1="630" y1="0" x2="630" y2="720"/>
+          <line x1="860" y1="0" x2="860" y2="720"/>
+          <line x1="1090" y1="0" x2="1090" y2="720"/>
+          <line x1="1290" y1="0" x2="1290" y2="720"/>
+        </g>
+
+        <!-- 主干道 -->
+        <g stroke="#1D2531" stroke-width="7">
+          <line x1="0" y1="332" x2="1368" y2="332"/>
+          <line x1="630" y1="0" x2="630" y2="720"/>
+        </g>
+
+        <!-- 已规划路线 -->
+        <path d="M120 660 L340 660 L340 470 L630 470 L630 300 L1050 300 L1050 166 L1300 166"
+              stroke="#14304C" stroke-width="28" fill="none"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M120 660 L340 660 L340 470 L630 470 L630 300 L1050 300 L1050 166 L1300 166"
+              stroke="#2E9BFF" stroke-width="12" fill="none"
+              stroke-linecap="round" stroke-linejoin="round"/>
+
+        <!-- 终点 -->
+        <circle cx="1300" cy="166" r="30" fill="#2E9BFF" opacity="0.18"/>
+        <circle cx="1300" cy="166" r="13" fill="#2E9BFF"/>
+
+        <!-- 车辆位置 -->
+        <g transform="translate(630,470)">
+          <circle r="36" fill="#2E9BFF" opacity="0.13"/>
+          <circle r="16" fill="#FFFFFF" stroke="#2E9BFF" stroke-width="5"/>
+        </g>
+      </svg>
+
+      <!-- 首页右侧：纯地图，无任何浮层（时间/行程卡/FAB 均移除） -->
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================
+     稿 2 · 导航页
+     右侧无卡片，地图占满全部剩余空间（导航态＝专注看路）
+     ============================================================ -->
+<div class="stage" style="margin-top:56px;">
+  <div class="stage-label">
+    <span class="idx">2</span>
+    <span class="name">导航页</span>
+    <span class="note">左侧导航栏（导航激活）· 右侧纯地图，无任何浮层</span>
+  </div>
+
+  <div class="screen">
+
+    <!-- 左侧窄导航栏 -->
+    <div class="navbar">
+      <div class="navbtn">
+        <svg viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 19 L21 6 L36 19 V35 a2 2 0 0 1-2 2 H8 a2 2 0 0 1-2-2 Z"
+                stroke="currentColor" stroke-width="3.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M16 37 V25 h10 v12" stroke="currentColor" stroke-width="3.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="navbtn on">
+        <svg viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M21 5 L37 37 L21 29.5 L5 37 Z" fill="currentColor"/>
+        </svg>
+      </div>
+      <div class="spacer"></div>
+      <div class="navbtn">
+        <svg viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="21" cy="21" r="6" stroke="currentColor" stroke-width="3.5"/>
+          <path d="M21 4 v5 M21 33 v5 M4 21 h5 M33 21 h5
+                   M9 9 l3.5 3.5 M29.5 29.5 L33 33 M33 9 l-3.5 3.5 M12.5 29.5 L9 33"
+                stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- 地图占满全部剩余空间（无卡片） -->
+    <div class="maparea">
+      <svg class="mapbg" viewBox="0 0 1808 720" preserveAspectRatio="none"
+           xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="mapbg2" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%"  stop-color="#0E1219"/>
+            <stop offset="100%" stop-color="#0A0D14"/>
+          </linearGradient>
+        </defs>
+        <rect width="1808" height="720" fill="url(#mapbg2)"/>
+
+        <!-- 次级路网 -->
+        <g stroke="#161C26" stroke-width="3">
+          <line x1="0" y1="96"  x2="1808" y2="96"/>
+          <line x1="0" y1="214" x2="1808" y2="214"/>
+          <line x1="0" y1="332" x2="1808" y2="332"/>
+          <line x1="0" y1="450" x2="1808" y2="450"/>
+          <line x1="0" y1="568" x2="1808" y2="568"/>
+          <line x1="200" y1="0" x2="200" y2="720"/>
+          <line x1="470" y1="0" x2="470" y2="720"/>
+          <line x1="740" y1="0" x2="740" y2="720"/>
+          <line x1="1010" y1="0" x2="1010" y2="720"/>
+          <line x1="1280" y1="0" x2="1280" y2="720"/>
+          <line x1="1550" y1="0" x2="1550" y2="720"/>
+        </g>
+
+        <!-- 主干道 -->
+        <g stroke="#1D2531" stroke-width="8">
+          <line x1="0" y1="360" x2="1808" y2="360"/>
+          <line x1="900" y1="0" x2="900" y2="720"/>
+        </g>
+
+        <!-- 已规划路线 -->
+        <path d="M150 660 L430 660 L430 470 L800 470 L800 300 L1350 300 L1350 166 L1700 166"
+              stroke="#14304C" stroke-width="30" fill="none"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M150 660 L430 660 L430 470 L800 470 L800 300 L1350 300 L1350 166 L1700 166"
+              stroke="#2E9BFF" stroke-width="13" fill="none"
+              stroke-linecap="round" stroke-linejoin="round"/>
+
+        <!-- 终点 -->
+        <circle cx="1700" cy="166" r="32" fill="#2E9BFF" opacity="0.18"/>
+        <circle cx="1700" cy="166" r="14" fill="#2E9BFF"/>
+
+        <!-- 车辆位置 -->
+        <g transform="translate(800,470)">
+          <circle r="40" fill="#2E9BFF" opacity="0.13"/>
+          <circle r="18" fill="#FFFFFF" stroke="#2E9BFF" stroke-width="6"/>
+        </g>
+      </svg>
+
+      <!-- 导航态：地图是唯一主体，无任何浮层（无时间 / 无行程卡 / 无 FAB / 无转向指引） -->
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

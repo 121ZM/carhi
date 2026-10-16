@@ -45,7 +45,9 @@ const exportsMap = new Map();   // filePath -> Set<symbol>
 function collectExports(src) {
   const set = new Set();
   // export class X / export interface X / export enum X / export function X
-  const declRe = /export\s+(?:abstract\s+)?(?:class|interface|enum|function|const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+  // ★ 必须含 struct —— ArkUI 的 `export struct Foo` 是合法导出，
+  //   漏了它会误报「导入的符号未导出」（WifiDirectCard 就踩过这个假警报）。
+  const declRe = /export\s+(?:abstract\s+)?(?:class|interface|enum|function|const|let|struct)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
   let m;
   while ((m = declRe.exec(src)) !== null) {
     set.add(m[1]);
