@@ -26,6 +26,7 @@ add_library(carlifecodec SHARED
     hmi_renderer.cpp
     pipeline_probe.cpp
     screen_encoder.cpp
+    keepalive_capture.cpp
 )
 
 target_link_libraries(carlifecodec PUBLIC
@@ -34,7 +35,7 @@ target_link_libraries(carlifecodec PUBLIC
     libnative_media_core.so           # OH_AVBuffer / OH_AVFormat
     libnative_media_codecbase.so      # OH_AVCodec 基类 / OH_MD_KEY_*
     libnative_media_venc.so           # OH_VideoEncoder_*
-    libnative_avscreen_capture.so     # ★ OH_AVScreenCapture_*（应用投屏采集）
+    libnative_avscreen_capture.so     # OH_AVScreenCapture_*（屏幕与音频采集）
     libnative_window.so               # OHNativeWindow (Surface)
     libpixelmap.so                    # OH_PixelmapNative_*（前台截图送编码器）
     libEGL.so                         # EGL（自绘 Surface 通路 / CPU 兜底上传）

@@ -33,6 +33,20 @@ export type FrameCallback = (data: ArrayBuffer, pts: number, keyFrame: boolean) 
 /** 错误回调 */
 export type ErrorCallback = (code: number, msg: string) => void;
 
+/** 原始音频回调：data 是独立的 PCM ArrayBuffer；sourceType 1=内录，2=麦克风 */
+export type AudioFrameCallback = (data: ArrayBuffer, timestampUs: number, sourceType: number) => void;
+
+/** 音频采集诊断快照 */
+export interface AudioCaptureStats {
+  running: boolean;
+  innerBuffers: number;
+  micBuffers: number;
+  videoBuffers: number;
+  lastStage: number;
+  interrupted: number;
+  queueDrops: number;
+}
+
 /** 编码器实际输出尺寸 */
 export interface EncodedSize {
   width: number;
@@ -323,7 +337,8 @@ export const runHmiSelfCheck: (options?: HmiSelfCheckOptions) => HmiSelfCheckRes
  *          19 = StartScreenCaptureWithSurface 失败（常见：用户拒绝授权）
  */
 export const startCapture: (options: EncoderOptions, onFrame: FrameCallback,
-                            onError?: ErrorCallback) => number;
+                            onError?: ErrorCallback,
+                            onAudioFrame?: AudioFrameCallback) => number;
 
 /** 停止采集并释放资源（幂等） */
 export const stopCapture: () => void;
@@ -342,6 +357,30 @@ export const restartCapture: () => number;
 export const isCaptureRunning: () => boolean;
 
 /**
+ * ★ 设置采集区域（「小窗口投屏」）—— 只把屏幕上一块矩形推给车机。
+ *
+ * 对应 `OH_AVScreenCapture_SetCaptureArea`（@since 20）。采集启动前/后都能调，
+ * 运行中可动态改（拖动小窗可实时跟随）。
+ *
+ * @param x,y 区域左上角，**屏幕坐标 px**（与 `window.getWindowProperties().windowRect` 同口径）
+ * @param width,height 区域尺寸 px（必须 > 0）
+ * @returns 0 成功；-1 参数非法；-2 采集未就绪（区域已缓存，下次启动生效）；-3 系统拒绝
+ *
+ * ⚠ 区域不得跨屏；失败时系统沿用上一次的区域。
+ */
+export const setCaptureArea: (x: number, y: number, width: number, height: number) => number;
+
+/**
+ * 清除采集区域、恢复整屏。
+ *
+ * 官方无「清除区域」接口，内部靠重建采集实例实现；受 `restartCapture` 的
+ * 冷却期限制 —— 冷却期内调用会返回成功但**不会**真正重建，区域仍然生效。
+ *
+ * @returns 0 成功；非 0 失败（同 restartCapture 的阶段号）
+ */
+export const clearCaptureArea: () => number;
+
+/**
  * 该错误码是否属于「可恢复」（上层据此决定要不要 restartCapture）。
  *
  * 可恢复：来电打断(-3) / 被其他应用抢占(-4) / 底层采集错误(-5)
@@ -351,3 +390,26 @@ export const isRecoverable: (code: number) => boolean;
 
 /** 采集编码器的实际输出尺寸 */
 export const captureEncodedSize: () => EncodedSize;
+
+// ===========================================================================
+// 音频采集（后台保活 + PCM 内录）
+//
+// KeepAliveCapture：只采系统播放音频（不开屏幕、不开麦），
+// 唯一使命是让长时任务 AUDIO_RECORDING "名实相符"，避免切后台被冻结。
+// 同时把原始 PCM 回调给 ArkTS，供后续写入 CarLife 音频通道（Task 11）。
+// ===========================================================================
+
+/**
+ * 启动仅内录采集。
+ *
+ * @param onAudioFrame PCM 回调（data: ArrayBuffer, timestampUs: number, sourceType: number）
+ *   sourceType: 1 = 内录，2 = 麦克风
+ * @returns 0 成功；51 = Create 失败；52 = Init 失败；53 = Start 失败；54 = 已在运行
+ */
+export const startAudioCapture: (onAudioFrame: AudioFrameCallback) => number;
+
+/** 停止音频采集（幂等） */
+export const stopAudioCapture: () => void;
+
+/** 音频采集诊断快照 */
+export const audioCaptureStats: () => AudioCaptureStats;

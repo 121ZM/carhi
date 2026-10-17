@@ -149,6 +149,20 @@ export class CarLifeRuntime {
    */
   static foregrounded: boolean = true;
 
+  /**
+   * ★ 内录 PCM 音频 sink（由引擎侧注入，供画面源转发）。
+   *
+   * 数据流：KeepAliveCapture / ScreenEncoder 采集的内录 PCM
+   *   → 本 sink → CarLifeEngine → MEDIA_DATA → 车机 AUDIO(Ch3/9240)。
+   *
+   * 官方 SDK 的 `FEATURE_CONFIG_AUDIO_TRANSMISSION_MODE` 默认 0 = 专用音频通道，
+   * 所以 TCP 推 PCM 是主路径（详见 core/CarLifeEngine.ets 音频节）。
+   *
+   * 放在这里的原因：两个画面源（NativeHmiSource / ScreenCaptureSource）都要用，
+   * 而它们之间不应互相依赖。传 null 解除绑定。
+   */
+  static audioSink: ((pcm: Uint8Array, timestampUs: number, sourceType: number) => void) | null = null;
+
   static addLog(text: string): void {
     const ts = new Date().toTimeString().substring(0, 8);
     CarLifeRuntime.logs.push(`[${ts}] ${text}`);

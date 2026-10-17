@@ -242,12 +242,25 @@ void ScreenEncoder::OnCaptureBufferAvailable(OH_AVScreenCapture *capture, OH_AVB
     }
     switch (bufferType) {
         case OH_SCREEN_CAPTURE_BUFFERTYPE_AUDIO_INNER: {
-            // ★ 关键路径：内录音频被真正消费 = "音频录制正在进行"。
-            //   前 3 个 + 每 300 个打一条，避免刷屏。
+            // 内录回调 buffer 只在本回调有效；统计后立即复制/交给上层同步复制。
             const uint64_t n = self->audioInnerBuffers_.fetch_add(1) + 1;
             if (n <= 3 || n % 300 == 0) {
                 LOGI("★ inner audio buffer #%{public}llu ts=%{public}lld",
                      static_cast<unsigned long long>(n), static_cast<long long>(timestamp));
+            }
+            if (self->onAudioFrame_ != nullptr && buffer != nullptr) {
+                OH_AVCodecBufferAttr attr{};
+                if (OH_AVBuffer_GetBufferAttr(buffer, &attr) == AV_ERR_OK
+                    && attr.size > 0 && attr.offset >= 0) {
+                    const int32_t capacity = OH_AVBuffer_GetCapacity(buffer);
+                    const uint8_t *addr = OH_AVBuffer_GetAddr(buffer);
+                    const int64_t end = static_cast<int64_t>(attr.offset) + attr.size;
+                    if (addr != nullptr && capacity >= 0 && end <= capacity) {
+                        const int64_t ptsUs = attr.pts > 0 ? attr.pts : timestamp / 1000;
+                        self->onAudioFrame_(addr + attr.offset, static_cast<size_t>(attr.size), ptsUs,
+                                            static_cast<int32_t>(bufferType));
+                    }
+                }
             }
             break;
         }
@@ -292,7 +305,7 @@ void ScreenEncoder::EmitError(int32_t code, const std::string &msg) {
 // ---------------------------------------------------------------------------
 
 int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
-                             ErrorCallback onError, LogCallback onLog) {
+                             ErrorCallback onError, LogCallback onLog, AudioCallback onAudioFrame) {
     if (running_.load()) {
         LOGI("already running, ignore Start");
         return STAGE_OK;
@@ -302,6 +315,7 @@ int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
     onFrame_ = std::move(onFrame);
     onError_ = std::move(onError);
     onLog_ = std::move(onLog);
+    onAudioFrame_ = std::move(onAudioFrame);
     forceKeyFrame_.store(false);
 
     // ---------------- 1. 编码器 ----------------
@@ -570,7 +584,105 @@ int32_t ScreenEncoder::StartCaptureLocked() {
             LOGW("ResizeCanvas failed code=%{public}d, keep config size", rErr);
         }
     }
+    // ★ 恢复采集区域（若此前设置过）。
+    //
+    //   `RestartCapture()` 会 ReleaseCapture() 后重建 `capture_`，区域设置
+    //   跟着旧实例一起丢失。不补回来的话，「小窗投屏」会在一次采集重启后
+    //   **悄悄退化成整屏**（画面突然多出手机全屏内容），日志里却什么都看不到。
+    //   区域只能在采集启动之后设置，所以放在这里而不是 Init 之前。
+    if (areaX_ >= 0 && areaY_ >= 0 && areaW_ > 0 && areaH_ > 0) {
+        OH_Rect area{};
+        area.x = areaX_;
+        area.y = areaY_;
+        area.width = areaW_;
+        area.height = areaH_;
+        OH_AVSCREEN_CAPTURE_ErrCode aErr =
+            OH_AVScreenCapture_SetCaptureArea(capture_, 0, &area);
+        if (aErr == AV_SCREEN_CAPTURE_ERR_OK) {
+            LOGI("capture area restored -> %{public}d,%{public}d %{public}dx%{public}d",
+                 areaX_, areaY_, areaW_, areaH_);
+        } else {
+            LOGW("restore capture area failed code=%{public}d, fallback to full screen",
+                 static_cast<int32_t>(aErr));
+        }
+    }
     return STAGE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// ★ 采集区域 —— 「小窗口投屏」的核心实现
+//
+// 背景：应用**不能**自建全局悬浮窗（`FLOAT_VIEW` 等权限要求系统应用，
+//       声明后装机直接失败 9568289，见 EntryAbility.ets 的实测注释）。
+//       可行路径是用户用系统「智慧多窗」把本应用拖成悬浮小窗，再把小窗的
+//       屏幕矩形交给采集器 —— 车机只看到这块，手机其余部分照常使用。
+//
+// 官方语义（native_avscreen_capture.h，@since 20）：
+//   - 采集启动前/后均可调用，运行中可动态改（拖窗口可实时跟随）；
+//   - 坐标与尺寸必须非负，区域不得跨屏；
+//   - 设置失败时沿用上一次的区域。
+// ---------------------------------------------------------------------------
+int32_t ScreenEncoder::SetCaptureArea(int32_t x, int32_t y, int32_t width, int32_t height) {
+    if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        LOGW("SetCaptureArea rejected: invalid rect %{public}d,%{public}d %{public}dx%{public}d",
+             x, y, width, height);
+        return -1;
+    }
+
+    std::lock_guard<std::mutex> guard(lock_);
+
+    // 先记账：即使采集此刻还没起来，下次 StartCaptureLocked 也会补上
+    areaX_ = x;
+    areaY_ = y;
+    areaW_ = width;
+    areaH_ = height;
+
+    if (capture_ == nullptr) {
+        LOGW("SetCaptureArea: capture not created, rect cached (%{public}d,%{public}d %{public}dx%{public}d)",
+             x, y, width, height);
+        return -2;
+    }
+
+    OH_Rect area{};
+    area.x = x;
+    area.y = y;
+    area.width = width;
+    area.height = height;
+
+    // displayId = 0（主屏）。区域跨屏会被系统拒绝 —— 这是官方明确限制。
+    OH_AVSCREEN_CAPTURE_ErrCode err =
+        OH_AVScreenCapture_SetCaptureArea(capture_, 0, &area);
+    if (err != AV_SCREEN_CAPTURE_ERR_OK) {
+        LOGW("SetCaptureArea failed code=%{public}d (rect %{public}d,%{public}d %{public}dx%{public}d)",
+             static_cast<int32_t>(err), x, y, width, height);
+        return -3;
+    }
+
+    LOGI("★ capture area set -> %{public}d,%{public}d %{public}dx%{public}d",
+         x, y, width, height);
+    if (onLog_) {
+        onLog_("采集区域已切换到当前窗口范围");
+    }
+    return 0;
+}
+
+int32_t ScreenEncoder::ClearCaptureArea() {
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        areaX_ = -1;
+        areaY_ = -1;
+        areaW_ = -1;
+        areaH_ = -1;
+        if (capture_ == nullptr || !captureStarted_.load()) {
+            // 采集没在跑，清掉记录就等于恢复整屏
+            return 0;
+        }
+    }
+    // 官方**没有**「清除区域」接口，唯一可靠的恢复整屏方式是重建采集实例
+    // （新建的 OH_AVScreenCapture 不带区域限制）。
+    // ⚠ 注意 RestartCapture 自带冷却：冷却期内的调用会直接返回成功但**不重建**，
+    //   此时区域仍然生效。上层若要「立刻」恢复整屏，应走完整的 stop→start。
+    return RestartCapture();
 }
 
 // ---------------------------------------------------------------------------

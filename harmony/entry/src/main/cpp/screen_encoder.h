@@ -68,6 +68,9 @@ public:
     using FrameCallback = std::function<void(const EncodedFrame &frame)>;
     using ErrorCallback = std::function<void(int32_t code, const std::string &msg)>;
     using LogCallback = std::function<void(const std::string &msg)>;
+    /** 原始内录 PCM 回调（只在采集回调有效期内访问 data；上层须立即复制） */
+    using AudioCallback = std::function<void(const uint8_t *data, size_t size,
+                                             int64_t timestampUs, int32_t sourceType)>;
 
     ScreenEncoder() = default;
     ~ScreenEncoder();
@@ -80,7 +83,7 @@ public:
      * @return 0 成功；非 0 为失败阶段编码（见实现内注释）
      */
     int32_t Start(const EncoderParams &params, FrameCallback onFrame,
-                  ErrorCallback onError, LogCallback onLog);
+                  ErrorCallback onError, LogCallback onLog, AudioCallback onAudioFrame = nullptr);
 
     /** 停止并释放全部资源（幂等） */
     void Stop();
@@ -97,6 +100,31 @@ public:
      * @return 0 成功；非 0 失败
      */
     int32_t SetFrameRate(int32_t frameRate);
+
+    /**
+     * ★ 设置采集区域（只投屏幕上一块矩形）—— 「小窗口投屏」的核心。
+     *
+     * 背景：应用**不能**自建全局悬浮窗（`FLOAT_VIEW` 等权限要求系统应用，
+     * 声明后装机直接失败 9568298/9568289）。可行路径是让用户用系统「智慧多窗」
+     * 把本应用拖成悬浮小窗，然后把该小窗的屏幕矩形交给采集器 —— 车机就只看到
+     * 这块内容，手机其余部分照常使用。
+     *
+     * 官方语义（`native_avscreen_capture.h`，@since 20）：
+     *   - 采集**启动前或启动后**均可调用，可运行中动态改（拖窗口实时跟随）；
+     *   - 坐标与尺寸必须非负，且区域不得跨屏；
+     *   - 设置失败时沿用上一次的区域。
+     *
+     * @param x,y     区域左上角（**屏幕坐标，px**，与 ArkTS `windowRect` 同口径）
+     * @param width,height 区域尺寸（px，必须 > 0）
+     * @return 0 成功；-1 参数非法；-2 采集未就绪；-3 系统拒绝（负的 ErrCode 会记日志）
+     */
+    int32_t SetCaptureArea(int32_t x, int32_t y, int32_t width, int32_t height);
+
+    /**
+     * 清除区域限制，恢复整屏采集。
+     * @return 0 成功；非 0 失败
+     */
+    int32_t ClearCaptureArea();
 
     /**
      * 仅重启屏幕采集（编码器保持存活）。
@@ -185,6 +213,7 @@ private:
     FrameCallback onFrame_;
     ErrorCallback onError_;
     LogCallback onLog_;
+    AudioCallback onAudioFrame_;
 
     OH_AVCodec *codec_ = nullptr;
     OH_AVScreenCapture *capture_ = nullptr;
@@ -196,6 +225,18 @@ private:
      * 编码器 Surface 每次重建都会让车机侧丢一段流，所以重启必须低频。
      */
     int64_t lastRestartMs_ = 0;
+
+    /**
+     * 当前生效的采集区域（-1 表示未设置 = 整屏）。
+     *
+     * 为什么要记下来：`RestartCapture()` 会销毁并重建 `OH_AVScreenCapture`
+     * 实例，区域设置随实例一起丢失。恢复后必须重新下发，否则「小窗投屏」
+     * 会在一次采集重启后悄悄变回整屏 —— 这种退化在日志里极难发现。
+     */
+    int32_t areaX_ = -1;
+    int32_t areaY_ = -1;
+    int32_t areaW_ = -1;
+    int32_t areaH_ = -1;
 
     std::mutex lock_;
 };

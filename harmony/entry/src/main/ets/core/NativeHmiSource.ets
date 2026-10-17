@@ -166,6 +166,8 @@ export class NativeHmiSource implements FrameSource {
   private selfTest: boolean = false;
   /** ★ 最近一次启动用的帧率（画面源切换时要按原参数重建编码器） */
   private static lastFps: number = 30;
+  /** ★ 保活音频累计收到的 PCM 帧数（诊断用） */
+  private static audioFrames: number = 0;
 
   /** 当前 HMI 状态（ArkTS 侧是唯一真值源，每次变更整包推给 native） */
   private payload: HmiStatePayload = {
@@ -385,6 +387,7 @@ export class NativeHmiSource implements FrameSource {
       if (fstage === 0) {
         this.fallback = true;
         this.running = true;
+        this.startKeepAliveAudio();
         CarLifeRuntime.addLog('[自绘] ⚠ 已回落：截图推流兜底（前台可用，切后台会冻结）');
         return true;
       }
@@ -394,6 +397,7 @@ export class NativeHmiSource implements FrameSource {
     }
 
     this.running = true;
+    this.startKeepAliveAudio();
     // 立刻推一次初始状态，避免车机看到空画面
     carlifecodec.setHmiState(this.payload);
     CarLifeRuntime.addLog(`[自绘] 原生 HMI 已启动（${w}x${h} @ ${opts.frameRate}fps, `
@@ -411,6 +415,11 @@ export class NativeHmiSource implements FrameSource {
     const wasFallback: boolean = this.fallback;
     this.fallback = false;
     try {
+      carlifecodec.stopAudioCapture();
+    } catch (e) {
+      // ignore
+    }
+    try {
       if (wasFallback) {
         carlifecodec.stopEncoder();
       } else {
@@ -420,6 +429,46 @@ export class NativeHmiSource implements FrameSource {
     } catch (e) {
       const err = e as Error;
       CarLifeRuntime.addLog(`[自绘] 停止异常: ${err.message}`);
+    }
+  }
+
+  /**
+   * 启动后台保活音频采集。
+   *
+   * 自绘模式（startHmi / startEncoder）没有屏幕采集会话，而长时任务
+   * AUDIO_RECORDING 的豁免判据是"真的有采集会话在跑"。
+   * 补一个「只采内录、不采屏、不开麦」的采集会话，才能让切后台不被冻结。
+   *
+   * 失败不阻断视频 —— 没有它只是切后台可能掉，前台画面照样推。
+   *
+   * ★ 顺带把内录 PCM 经 audioSink 转交引擎发车机（Ch3/9240）：
+   *   官方 SDK 的 FEATURE_CONFIG_AUDIO_TRANSMISSION_MODE 默认 0=专用音频通道。
+   */
+  private startKeepAliveAudio(): void {
+    try {
+      const stage: number = carlifecodec.startAudioCapture(
+        (data: ArrayBuffer, timestampUs: number, sourceType: number): void => {
+          NativeHmiSource.audioFrames++;
+          // 转交引擎（若有）：内录 PCM → MSG_MEDIA_DATA → 车机 Ch3/9240
+          if (sourceType === 1 && CarLifeRuntime.audioSink !== null) {
+            // sourceType 1 = 内录（系统播放音频）；2 = 麦克风（已关，正常不来）
+            const sink = CarLifeRuntime.audioSink;
+            if (sink !== null) {
+              sink(new Uint8Array(data), timestampUs, sourceType);
+            }
+          }
+        }
+      );
+      if (stage === 0) {
+        CarLifeRuntime.addLog('[音频] 保活采集已启动');
+      } else if (stage === 54) {
+        // ALREADY_RUNNING —— 正常，切模式时不重起
+      } else {
+        CarLifeRuntime.addLog(`[音频] ⚠ 保活采集启动失败 stage=${stage}`);
+      }
+    } catch (e) {
+      const err = e as Error;
+      CarLifeRuntime.addLog(`[音频] 保活采集异常: ${err.message}`);
     }
   }
 

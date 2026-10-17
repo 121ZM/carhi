@@ -19,14 +19,20 @@
  *   产出的 H.264 帧封包发往视频通道。**画面从哪里来由 route A 的画布层决定**
  *   （待接入：自绘 Surface -> 编码器）。
  *
- * 音频不在此引擎内：导航语音通过蓝牙 A2DP 独立输出，不占用 CarLife 协议通道。
+ * ★ 音频：本引擎同时承担**媒体音频通道（Ch3, 9240）**的发送
+ *   （MSG_MEDIA_INIT + MSG_MEDIA_DATA PCM 裸流 + MSG_MEDIA_STOP）。
+ *   官方 CarLife SDK 集成文档明确：`FEATURE_CONFIG_AUDIO_TRANSMISSION_MODE`
+ *   默认 0 = **专用音频通道**（TCP），1 = 蓝牙通道。所以推 PCM 走 9240 是主路径，
+ *   不是 hack。消息 ID 已按官方两个来源（Android 车机端 CommonParams.java /
+ *   跨平台 C++ 车机库 CTranRecvPackageProcess.h）核实，详见 Constants.ets。
+ *   采集侧 PCM 由画面源（NativeHmiSource 的保活采集 / ScreenCaptureSource）提供。
  */
 
 import { CarLifeChannelServer, ChannelServerListener } from '../transport/ChannelServer';
 import { CarLifeStateMachine, HandshakeState, StateMachineListener, VideoParams } from './StateMachine';
 import { BackgroundKeeper } from './BackgroundKeeper';
 import { Message, packMessage } from '../protocol/Framing';
-import { CarlifeTouchAction } from '../protocol/Messages';
+import { CarlifeMusicInit, CarlifeTouchAction } from '../protocol/Messages';
 import * as C from '../protocol/Constants';
 
 /** 引擎状态回调 */
@@ -35,6 +41,16 @@ export interface EngineListener {
   onLog: (text: string) => void;
   onChannelChange: (channel: number, connected: boolean) => void;
   onStats: (fps: number, kbps: number, frames: number) => void;
+}
+
+/** 媒体音频诊断快照（Ch3/9240） */
+export interface AudioStats {
+  /** 已发出的 PCM 帧数（MEDIA_DATA 计数） */
+  frames: number;
+  /** 已发出的 PCM 字节数 */
+  bytes: number;
+  /** MEDIA_INIT 是否已发出且未失效 */
+  initSent: boolean;
 }
 
 /**
@@ -95,6 +111,23 @@ export class CarLifeEngine {
   /** 最近一次启动推流用的参数 */
   private lastParams: VideoParams | null = null;
 
+  // ---- 媒体音频（Ch3, 9240）----
+  /** MSG_MEDIA_INIT 是否已发（或已排队待发）—— 收到 PCM 前必须先 INIT */
+  private audioInitSent: boolean = false;
+  /** 音频流是否处于活动状态（采集侧活着，通道断开后保留以便重连补 INIT） */
+  private audioCaptureActive: boolean = false;
+  /** 当前协商的音频参数（INIT 用；重连后按同参数重发） */
+  private audioSampleRate: number = 48000;
+  private audioChannels: number = 2;
+  private audioSampleFormat: number = 16;
+  /** 音频统计 */
+  private audioFrameCount: number = 0;
+  private audioByteCount: number = 0;
+  /** 统计定时器 tick 计数（驱动音频吞吐日志的 5 秒节流） */
+  private statTickCount: number = 0;
+  /** 单个 MEDIA_DATA 帧的最大字节数（HU 侧 MEDIA_DATA_SIZE=100KB，留足余量） */
+  private static readonly AUDIO_FRAME_MAX_BYTES: number = 48 * 1024;
+
   constructor(listener: EngineListener, factory: FrameSourceFactory | null = null) {
     this.listener = listener;
     this.frameSourceFactory = factory;
@@ -125,6 +158,11 @@ export class CarLifeEngine {
           // 车机刚接上视频通道，立刻补一个 I 帧，避免它等一个 GOP 才有画面
           this.source.requestKeyFrame();
         }
+        if (channel === C.CHANNEL_AUDIO && this.audioCaptureActive) {
+          // ★ 音频通道（重）连上：INIT 随连接失效，必须重发，
+          //   否则车机会把后续 PCM 数据当成「没有 AudioTrack 的裸流」丢掉。
+          this.sendAudioInit();
+        }
       },
       onChannelDisconnected: (channel: number) => {
         this.listener.onChannelChange(channel, false);
@@ -132,6 +170,10 @@ export class CarLifeEngine {
         if (channel === C.CHANNEL_CMD) {
           this.stopStreaming();
           this.sm?.stop();
+        }
+        if (channel === C.CHANNEL_AUDIO) {
+          // 断开只作废 INIT 标记；采集仍在跑，等通道回来由 onChannelConnected 补发
+          this.audioInitSent = false;
         }
       },
       onCommandMessage: (msg: Message) => {
@@ -259,6 +301,14 @@ export class CarLifeEngine {
       this.lastBytes = this.totalBytes;
       this.listener.onStats(frames, Math.round(bytes * 8 / 1000), this.frameCount);
 
+      // 音频吞吐：每 5 秒一条（帧数与 INIT 状态），真机核对「PCM 真的在发」用
+      this.statTickCount++;
+      if (this.statTickCount % 5 === 0 && this.audioFrameCount > 0) {
+        this.listener.onLog(`[音频] 累计 ${this.audioFrameCount} 帧 / `
+          + `${Math.round(this.audioByteCount / 1024)}KB`
+          + (this.audioInitSent ? '（INIT 已发）' : '（⚠ INIT 未发/已失效）'));
+      }
+
       // 心跳健康度：超过 3 秒没收到车机视频心跳就要警惕（车机侧阈值约 6 秒）。
       // 注意只在"正常 → 异常"的那一次转换时告警，否则会每秒刷屏。
       const now = Date.now();
@@ -344,12 +394,115 @@ export class CarLifeEngine {
     });
   }
 
+  // ==================== 媒体音频（Ch3, 9240） ====================
+
+  /**
+   * 启动音频流：向车机 AUDIO 通道发 MSG_MEDIA_INIT（CarlifeMusicInit）。
+   *
+   * 必须在第一帧 PCM 之前到达 —— 车机靠它创建 AudioTrack
+   * （官方车机端 `AudioTrackManagerSingle.initAudioTrack`：
+   *  channelConfig 1=mono / 2=stereo，sampleFormat 8=8bit / 16=16bit）。
+   *
+   * @param sampleRate 采集侧真实采样率（Hz）
+   * @param channels   声道数（1 或 2）
+   * @param sampleFormat 位深（8 或 16）
+   * @returns true = 已发送（或已在采集中排队，通道连上后自动补发）
+   */
+  startAudioStream(sampleRate: number, channels: number, sampleFormat: number): boolean {
+    this.audioCaptureActive = true;
+    this.audioSampleRate = sampleRate > 0 ? sampleRate : 48000;
+    this.audioChannels = channels === 1 ? 1 : 2;
+    this.audioSampleFormat = sampleFormat === 8 ? 8 : 16;
+    this.sendAudioInit();
+    return true;
+  }
+
+  /** 实际发送（或条件不满足时跳过）MEDIA_INIT */
+  private sendAudioInit(): void {
+    const server = this.server;
+    if (!this.audioCaptureActive || server === null || !server.isAudioReady) {
+      return;   // 通道未就绪：保持 audioInitSent=false，连上时由 onChannelConnected 补发
+    }
+    if (this.audioInitSent) {
+      return;
+    }
+    const init = new CarlifeMusicInit();
+    init.sampleRate = this.audioSampleRate;
+    init.channelConfig = this.audioChannels;
+    init.sampleFormat = this.audioSampleFormat;
+    const frame = packMessage(C.CHANNEL_AUDIO, C.MSG_MEDIA_INIT, init.encode(), 0);
+    server.send(C.CHANNEL_AUDIO, frame).catch(() => {
+      // 发送失败：'close' 事件会重置 audioInitSent 并触发补发
+    });
+    this.audioInitSent = true;
+    this.listener.onLog(`[音频] → MEDIA_INIT ${this.audioSampleRate}Hz `
+      + `${this.audioChannels === 2 ? 'stereo' : 'mono'} ${this.audioSampleFormat}bit（Ch3/9240）`);
+  }
+
+  /**
+   * 发送一帧 PCM（MSG_MEDIA_DATA，Ch3/9240，12 字节头 + 原始 PCM）。
+   *
+   * - 未 INIT 时丢弃（等 INIT 发出后的第一帧才开始计）；
+   * - 超过 48KB 自动分片（HU 侧 media buffer 100KB，分片后仍远低于上限）。
+   *
+   * @param pcm S16LE 交织字节（与 INIT 声明的格式一致）
+   * @param timestampUs 采集时间戳（微秒），与视频 pts 同一时钟
+   */
+  sendAudioFrame(pcm: Uint8Array, timestampUs: number): void {
+    const server = this.server;
+    if (!this.audioInitSent || server === null || !server.isAudioReady) {
+      return;
+    }
+    if (pcm.length === 0) {
+      return;
+    }
+    const max: number = CarLifeEngine.AUDIO_FRAME_MAX_BYTES;
+    let offset: number = 0;
+    do {
+      const n: number = Math.min(max, pcm.length - offset);
+      const chunk: Uint8Array = pcm.subarray(offset, offset + n);
+      const frame = packMessage(C.CHANNEL_AUDIO, C.MSG_MEDIA_DATA, chunk,
+        timestampUs & 0xFFFFFFFF);
+      server.send(C.CHANNEL_AUDIO, frame).catch(() => {
+        // 丢弃该片；通道异常由 'close' 事件兜底
+      });
+      this.audioFrameCount++;
+      this.audioByteCount += chunk.length;
+      offset += n;
+    } while (offset < pcm.length);
+  }
+
+  /** 停止音频流：发送 MSG_MEDIA_STOP（停止采集/停流时调） */
+  stopAudioStream(): void {
+    const wasActive: boolean = this.audioCaptureActive;
+    this.audioCaptureActive = false;
+    this.audioInitSent = false;
+    const server = this.server;
+    if (wasActive && server !== null && server.isAudioReady) {
+      const frame = packMessage(C.CHANNEL_AUDIO, C.MSG_MEDIA_STOP, new Uint8Array(0), 0);
+      server.send(C.CHANNEL_AUDIO, frame).catch(() => {
+        // 忽略：通道可能即将关闭
+      });
+      this.listener.onLog('[音频] → MEDIA_STOP（Ch3/9240）');
+    }
+  }
+
+  /** 音频诊断快照（帧数/字节数，供 UI 展示） */
+  get audioStats(): AudioStats {
+    return {
+      frames: this.audioFrameCount,
+      bytes: this.audioByteCount,
+      initSent: this.audioInitSent
+    };
+  }
+
   /** 停止推流 */
   private stopStreaming(): void {
     if (!this.streaming) {
       return;
     }
     this.streaming = false;
+    this.stopAudioStream();   // 音频跟随视频一起停（采集侧生命周期与推流一致）
     this.source?.stop();
     this.source = null;
     this.listener.onLog('推流已停止');

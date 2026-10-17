@@ -190,15 +190,30 @@ export const MSG_CMD_VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: number = 65549;
 export const MSG_CMD_HU_HEARTBEAT: number = 131074;
 /** 0x00020001: 视频帧数据 (H.264 NALU) */
 export const MSG_VIDEO_DATA: number = 131073;
-/** 0x00030001: 媒体音频初始化 (CarlifeMusicInit) */
+/**
+ * 0x00030001: 媒体音频初始化 (CarlifeMusicInit)
+ *
+ * ★ 2026-10-16 修正：本文件的 MEDIA_DATA / MEDIA_STOP 曾**互相写反**
+ *   （旧值 DATA=0x30002 / STOP=0x30006）。已对照两个官方来源修正：
+ *   - 官方 Android 车机端 CommonParams.java（Apollo-DuerOS / CarLife-Android-Vehicle）
+ *   - 官方跨平台 C++ 车机库 CTranRecvPackageProcess.h（CarLife-Vehicle-Lib）
+ *   两处一致为：STOP=0x30002、PAUSE=0x30003、RESUME_PLAY=0x30004、
+ *   SEEK_TO=0x30005、**DATA=0x30006**。旧值会让车机把 PCM 数据帧当成停止命令。
+ */
 export const MSG_MEDIA_INIT: number = 196609;
-/** 0x00030002: 媒体音频裸流 (PCM) */
-export const MSG_MEDIA_DATA: number = 196610;
-/** 0x00030006: 媒体音频停止 */
-export const MSG_MEDIA_STOP: number = 196614;
+/** 0x00030002: 媒体音频停止 */
+export const MSG_MEDIA_STOP: number = 196610;
+/** 0x00030003: 媒体音频暂停 */
+export const MSG_MEDIA_PAUSE: number = 196611;
+/** 0x00030004: 媒体音频恢复播放 */
+export const MSG_MEDIA_RESUME_PLAY: number = 196612;
+/** 0x00030005: 媒体音频跳转（CarlifeMusicSeekTo） */
+export const MSG_MEDIA_SEEK_TO: number = 196613;
+/** 0x00030006: 媒体音频裸流 (PCM) */
+export const MSG_MEDIA_DATA: number = 196614;
 /** 0x00040001: 导航TTS初始化 (CarlifeTTSInit) */
 export const MSG_NAVI_TTS_INIT: number = 262145;
-/** 0x00040002: 导航TTS停止 */
+/** 0x00040002: 导航TTS停止（官方名 NAVI_TTS_END） */
 export const MSG_NAVI_TTS_STOP: number = 262146;
 /** 0x00040003: 导航TTS裸流 (PCM) */
 export const MSG_NAVI_TTS_DATA: number = 262147;
@@ -309,8 +324,11 @@ const MSG_NAMES: Record<number, string> = {
   131073: 'VIDEO_DATA',
   131074: 'HU_HEARTBEAT',
   196609: 'MEDIA_INIT',
-  196610: 'MEDIA_DATA',
-  196614: 'MEDIA_STOP',
+  196610: 'MEDIA_STOP',
+  196611: 'MEDIA_PAUSE',
+  196612: 'MEDIA_RESUME_PLAY',
+  196613: 'MEDIA_SEEK_TO',
+  196614: 'MEDIA_DATA',
   262145: 'NAVI_TTS_INIT',
   262146: 'NAVI_TTS_STOP',
   262147: 'NAVI_TTS_DATA',

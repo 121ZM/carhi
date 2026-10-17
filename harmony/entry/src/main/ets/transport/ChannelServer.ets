@@ -18,7 +18,7 @@
 
 import { socket } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { ALL_CHANNELS, ChannelDef, CHANNEL_CMD, CHANNEL_VIDEO } from '../protocol/Constants';
+import { ALL_CHANNELS, ChannelDef, CHANNEL_AUDIO, CHANNEL_CMD, CHANNEL_VIDEO } from '../protocol/Constants';
 import { MessageStreamReader, Message } from '../protocol/Framing';
 
 const TAG = 'CarLifeChannelServer';
@@ -302,6 +302,11 @@ export class CarLifeChannelServer {
   /** 视频通道是否就绪 */
   get isVideoReady(): boolean {
     return this.isConnected(CHANNEL_VIDEO);
+  }
+
+  /** 媒体音频通道（Ch3/9240）是否就绪 */
+  get isAudioReady(): boolean {
+    return this.isConnected(CHANNEL_AUDIO);
   }
 
   /** 停止全部通道 */

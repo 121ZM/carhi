@@ -20,6 +20,7 @@
  *   丢帧后立刻补 I 帧，车机侧最多花一个 I 帧周期恢复画面。
  */
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -34,10 +35,12 @@
 #include "hmi_renderer.h"
 #include "pipeline_probe.h"
 #include "screen_encoder.h"
+#include "keepalive_capture.h"
 
 #define LOG_DOMAIN 0x0001
 #define LOG_TAG "CarHiNative"
 #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) OH_LOG_Print(LOG_APP, LOG_WARN, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -58,10 +61,21 @@ struct ErrorTask {
     std::string message;
 };
 
+/** 投递到 JS 线程的原始 PCM 块 */
+struct AudioTask {
+    std::vector<uint8_t> data;
+    int64_t timestampUs = 0;
+    int32_t sourceType = 0;
+};
+
 napi_threadsafe_function g_frameTsfn = nullptr;
 napi_threadsafe_function g_errorTsfn = nullptr;
+napi_threadsafe_function g_audioTsfn = nullptr;
+std::mutex g_audioTsfnMutex;
+std::atomic<uint64_t> g_audioQueueDrops{0};
 std::unique_ptr<carhi::CanvasEncoder> g_encoder;
 std::unique_ptr<carhi::HmiRenderer> g_hmi;
+std::unique_ptr<carhi::KeepAliveCapture> g_keepAliveCapture;
 
 /**
  * ★ 录屏画面源（应用投屏）—— 与 `g_encoder`（自绘/截图用的编码器）**互斥**。
@@ -128,6 +142,80 @@ void CallErrorJs(napi_env env, napi_value jsCallback, void * /*context*/, void *
     napi_value argv[2] = {code, message};
     napi_value result = nullptr;
     napi_call_function(env, undefined, jsCallback, 2, argv, &result);
+}
+
+void CallAudioFrameJs(napi_env env, napi_value jsCallback, void * /*context*/, void *data) {
+    std::unique_ptr<AudioTask> task(static_cast<AudioTask *>(data));
+    if (env == nullptr || jsCallback == nullptr || task == nullptr) {
+        return;
+    }
+
+    napi_value undefined = nullptr;
+    napi_get_undefined(env, &undefined);
+
+    void *raw = nullptr;
+    napi_value buffer = nullptr;
+    if (napi_create_arraybuffer(env, task->data.size(), &raw, &buffer) != napi_ok) {
+        return;
+    }
+    if (!task->data.empty() && raw != nullptr) {
+        std::memcpy(raw, task->data.data(), task->data.size());
+    }
+
+    napi_value timestamp = nullptr;
+    napi_create_int64(env, task->timestampUs, &timestamp);
+    napi_value sourceType = nullptr;
+    napi_create_int32(env, task->sourceType, &sourceType);
+    napi_value argv[3] = {buffer, timestamp, sourceType};
+    napi_value result = nullptr;
+    napi_call_function(env, undefined, jsCallback, 3, argv, &result);
+}
+
+void QueueAudioFrame(const uint8_t *data, size_t size, int64_t timestampUs, int32_t sourceType) {
+    if (data == nullptr || size == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(g_audioTsfnMutex);
+    if (g_audioTsfn == nullptr) {
+        return;
+    }
+
+    auto task = std::make_unique<AudioTask>();
+    task->data.assign(data, data + size);
+    task->timestampUs = timestampUs;
+    task->sourceType = sourceType;
+    const napi_status status =
+        napi_call_threadsafe_function(g_audioTsfn, task.get(), napi_tsfn_nonblocking);
+    if (status == napi_ok) {
+        task.release();
+    } else {
+        const uint64_t dropped = g_audioQueueDrops.fetch_add(1) + 1;
+        if (dropped == 1 || dropped % 200 == 0) {
+            LOGW("PCM callback queue full; dropped=%{public}llu",
+                 static_cast<unsigned long long>(dropped));
+        }
+    }
+}
+
+bool CreateAudioTsfn(napi_env env, napi_value callback) {
+    std::lock_guard<std::mutex> guard(g_audioTsfnMutex);
+    if (g_audioTsfn != nullptr) {
+        return true;
+    }
+    napi_value resourceName = nullptr;
+    napi_create_string_utf8(env, "CarLifePcm", NAPI_AUTO_LENGTH, &resourceName);
+    const napi_status status = napi_create_threadsafe_function(
+        env, callback, nullptr, resourceName, 32, 1, nullptr, nullptr, nullptr,
+        CallAudioFrameJs, &g_audioTsfn);
+    return status == napi_ok && g_audioTsfn != nullptr;
+}
+
+void ReleaseAudioTsfn() {
+    std::lock_guard<std::mutex> guard(g_audioTsfnMutex);
+    if (g_audioTsfn != nullptr) {
+        napi_release_threadsafe_function(g_audioTsfn, napi_tsfn_release);
+        g_audioTsfn = nullptr;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -570,8 +658,8 @@ napi_value EncodedSize(napi_env env, napi_callback_info info) {
  *   onFrame：(data: ArrayBuffer, pts: number, keyFrame: boolean) => void
  */
 napi_value StartCapture(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value args[3] = {nullptr, nullptr, nullptr};
+    size_t argc = 4;
+    napi_value args[4] = {nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     if (argc < 2) {
@@ -630,8 +718,25 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
                                         CallErrorJs, &g_errorTsfn);
     }
 
+    bool hasAudioCb = false;
+    napi_valuetype audioType = napi_undefined;
+    if (argc >= 4 && args[3] != nullptr) {
+        napi_typeof(env, args[3], &audioType);
+        hasAudioCb = (audioType == napi_function);
+    }
+    if (hasAudioCb && !CreateAudioTsfn(env, args[3])) {
+        napi_throw_error(env, nullptr, "failed to create PCM callback bridge");
+        return nullptr;
+    }
+
+    carhi::ScreenEncoder::AudioCallback audioCb = nullptr;
+    if (hasAudioCb) {
+        audioCb = [](const uint8_t *data, size_t size, int64_t timestampUs, int32_t sourceType) {
+            QueueAudioFrame(data, size, timestampUs, sourceType);
+        };
+    }
     g_screenEncoder = std::make_unique<carhi::ScreenEncoder>();
-    int32_t stage = g_screenEncoder->Start(params, OnFrame, OnError, OnLog);
+    int32_t stage = g_screenEncoder->Start(params, OnFrame, OnError, OnLog, std::move(audioCb));
     if (stage != 0) {
         LOGE("screen capture start failed at stage %{public}d", stage);
         g_screenEncoder.reset();
@@ -642,6 +747,9 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         if (g_errorTsfn != nullptr) {
             napi_release_threadsafe_function(g_errorTsfn, napi_tsfn_release);
             g_errorTsfn = nullptr;
+        }
+        if (hasAudioCb) {
+            ReleaseAudioTsfn();
         }
     }
 
@@ -667,6 +775,7 @@ napi_value StopCapture(napi_env env, napi_callback_info info) {
         napi_release_threadsafe_function(g_errorTsfn, napi_tsfn_release);
         g_errorTsfn = nullptr;
     }
+    ReleaseAudioTsfn();
 
     napi_value undefined = nullptr;
     napi_get_undefined(env, &undefined);
@@ -688,9 +797,66 @@ napi_value RestartCapture(napi_env env, napi_callback_info info) {
     return result;
 }
 
-/** 录屏管线是否在跑 */
-napi_value IsCaptureRunning(napi_env env, napi_callback_info info) {
+/**
+ * ★ 设置采集区域（只投屏幕上一块矩形）—— 「小窗口投屏」。
+ *
+ * 签名：setCaptureArea(x, y, width, height) -> number（0 成功）
+ *   x/y/w/h 为**屏幕坐标 px**，与 ArkTS `window.getWindowProperties().windowRect` 同口径。
+ *
+ * 典型用法：用户用系统「智慧多窗」把本应用拖成悬浮小窗后，把该小窗的
+ * windowRect 传进来，车机就只看到这块内容，手机其余部分照常使用。
+ *
+ * 返回：0 成功 / -1 参数非法 / -2 采集未就绪 / -3 系统拒绝。
+ */
+napi_value SetCaptureArea(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value args[4] = {nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 4) {
+        napi_throw_type_error(env, nullptr,
+                              "setCaptureArea requires (x, y, width, height)");
+        return nullptr;
+    }
+
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t w = 0;
+    int32_t h = 0;
+    napi_get_value_int32(env, args[0], &x);
+    napi_get_value_int32(env, args[1], &y);
+    napi_get_value_int32(env, args[2], &w);
+    napi_get_value_int32(env, args[3], &h);
+
+    int32_t ret = -1;
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        if (g_screenEncoder != nullptr) {
+            ret = g_screenEncoder->SetCaptureArea(x, y, w, h);
+        }
+    }
+    napi_value result = nullptr;
+    napi_create_int32(env, ret, &result);
+    return result;
+}
+
+/** 清除采集区域、恢复整屏（内部会重建采集实例，注意 RestartCapture 的冷却） */
+napi_value ClearCaptureArea(napi_env env, napi_callback_info info) {
     (void)info;
+    int32_t ret = -1;
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        if (g_screenEncoder != nullptr) {
+            ret = g_screenEncoder->ClearCaptureArea();
+        }
+    }
+    napi_value result = nullptr;
+    napi_create_int32(env, ret, &result);
+    return result;
+}
+
+/** 录屏管线是否在跑 */
+napi_value IsCaptureRunning(napi_env env, napi_callback_info info) {    (void)info;
     bool running = false;
     {
         std::lock_guard<std::mutex> guard(g_lock);
@@ -737,6 +903,98 @@ napi_value CaptureEncodedSize(napi_env env, napi_callback_info info) {
     napi_create_int32(env, h, &height);
     napi_set_named_property(env, result, "width", width);
     napi_set_named_property(env, result, "height", height);
+    return result;
+}
+
+/** 启动仅内录采集，给 NativeHmiSource 的 CarLife 音频流使用。 */
+napi_value StartAudioCapture(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_type_error(env, nullptr, "startAudioCapture requires (onAudioFrame)");
+        return nullptr;
+    }
+    napi_valuetype callbackType = napi_undefined;
+    napi_typeof(env, args[0], &callbackType);
+    if (callbackType != napi_function) {
+        napi_throw_type_error(env, nullptr, "onAudioFrame must be a function");
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (g_screenEncoder != nullptr && g_screenEncoder->IsRunning()) {
+        napi_value conflict = nullptr;
+        napi_create_int32(env, carhi::KA_STAGE_START_FAILED, &conflict);
+        return conflict;
+    }
+    if (g_keepAliveCapture != nullptr && g_keepAliveCapture->IsRunning()) {
+        napi_value already = nullptr;
+        napi_create_int32(env, carhi::KA_STAGE_ALREADY_RUNNING, &already);
+        return already;
+    }
+    if (!CreateAudioTsfn(env, args[0])) {
+        napi_throw_error(env, nullptr, "failed to create PCM callback bridge");
+        return nullptr;
+    }
+
+    g_keepAliveCapture = std::make_unique<carhi::KeepAliveCapture>();
+    const int32_t stage = g_keepAliveCapture->Start(false,
+        [](const carhi::CapturedAudioFrame &frame) {
+            QueueAudioFrame(frame.data.data(), frame.data.size(), frame.timestampUs, frame.sourceType);
+        });
+    if (stage != carhi::KA_STAGE_OK && stage != carhi::KA_STAGE_ALREADY_RUNNING) {
+        LOGE("audio-only capture start failed stage=%{public}d", stage);
+        g_keepAliveCapture.reset();
+        ReleaseAudioTsfn();
+    }
+
+    napi_value result = nullptr;
+    napi_create_int32(env, stage, &result);
+    return result;
+}
+
+napi_value StopAudioCapture(napi_env env, napi_callback_info info) {
+    (void)info;
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        if (g_keepAliveCapture != nullptr) {
+            g_keepAliveCapture->Stop();
+            g_keepAliveCapture.reset();
+        }
+        ReleaseAudioTsfn();
+    }
+    napi_value undefined = nullptr;
+    napi_get_undefined(env, &undefined);
+    return undefined;
+}
+
+napi_value AudioCaptureStats(napi_env env, napi_callback_info info) {
+    (void)info;
+    carhi::KeepAliveSnapshot snapshot{};
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        if (g_keepAliveCapture != nullptr) {
+            snapshot = g_keepAliveCapture->Snapshot();
+        }
+    }
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    napi_value value = nullptr;
+    napi_get_boolean(env, snapshot.running != 0, &value);
+    napi_set_named_property(env, result, "running", value);
+    napi_create_int64(env, snapshot.innerBuffers, &value);
+    napi_set_named_property(env, result, "innerBuffers", value);
+    napi_create_int64(env, snapshot.micBuffers, &value);
+    napi_set_named_property(env, result, "micBuffers", value);
+    napi_create_int64(env, snapshot.videoBuffers, &value);
+    napi_set_named_property(env, result, "videoBuffers", value);
+    napi_create_int32(env, snapshot.lastStage, &value);
+    napi_set_named_property(env, result, "lastStage", value);
+    napi_create_int32(env, snapshot.interrupted, &value);
+    napi_set_named_property(env, result, "interrupted", value);
+    napi_create_int64(env, static_cast<int64_t>(g_audioQueueDrops.load()), &value);
+    napi_set_named_property(env, result, "queueDrops", value);
     return result;
 }
 
@@ -1283,8 +1541,15 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"stopCapture", nullptr, StopCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restartCapture", nullptr, RestartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isCaptureRunning", nullptr, IsCaptureRunning, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // ★ 采集区域（「小窗口投屏」）：只把屏幕上一块矩形推给车机
+        {"setCaptureArea", nullptr, SetCaptureArea, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clearCaptureArea", nullptr, ClearCaptureArea, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isRecoverable", nullptr, IsRecoverable, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"captureEncodedSize", nullptr, CaptureEncodedSize, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // Audio-only inner playback capture for NativeHmiSource.
+        {"startAudioCapture", nullptr, StartAudioCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopAudioCapture", nullptr, StopAudioCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"audioCaptureStats", nullptr, AudioCaptureStats, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

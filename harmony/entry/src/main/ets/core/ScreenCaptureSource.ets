@@ -44,6 +44,21 @@ export const CAPTURE_STOPPED_BY_CALL: number = -3;
 export const CAPTURE_INTERRUPT_BY_OTHER: number = -4;
 export const CAPTURE_ERROR: number = -5;
 
+/**
+ * 采集区域（屏幕坐标，px）。
+ *
+ * ★ 「小窗口投屏」：应用自建全局悬浮窗在鸿蒙上不可行（`FLOAT_VIEW` 等权限
+ *   要求系统应用，声明后装机直接失败 9568289）。可行路径是用户用系统
+ *   「智慧多窗」把本应用拖成悬浮小窗，再把该小窗的 `windowRect` 交给采集器，
+ *   于是车机只看到这块内容，手机其余部分照常使用。
+ */
+export interface CaptureArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** 采集运行诊断（给设置页展示） */
 export interface CaptureDiag {
   running: boolean;
@@ -82,6 +97,18 @@ export class ScreenCaptureSource implements FrameSource {
   private lastErrorMsg: string = '';
   /** 采集已启动的次数（配合 CaptureGate 的配额） */
   private startAttempts: number = 0;
+  /** 当前采集区域（null = 整屏） */
+  private area: CaptureArea | null = null;
+
+  /** 当前采集区域（null = 整屏采集） */
+  get captureArea(): CaptureArea | null {
+    return this.area;
+  }
+
+  /** 是否处于「只投一块区域」模式 */
+  get isRegionMode(): boolean {
+    return this.area !== null;
+  }
 
   get isRunning(): boolean {
     return this.running;
@@ -169,8 +196,19 @@ export class ScreenCaptureSource implements FrameSource {
 
     this.startAttempts++;
     let stage: number = -1;
+    // ★ 音频通路（Ch3/9240）：ScreenEncoder 本就在采内录音频，加第 4 参即可把
+    //   PCM 转出去（不发时它只在内部消费、保长时任务名实相符）。
+    //   官方 FEATURE_CONFIG_AUDIO_TRANSMISSION_MODE 默认 0=专用音频通道。
+    const audioCb = (data: ArrayBuffer, timestampUs: number, sourceType: number): void => {
+      if (sourceType === 1 && CarLifeRuntime.audioSink !== null) {
+        const sink = CarLifeRuntime.audioSink;
+        if (sink !== null) {
+          sink(new Uint8Array(data), timestampUs, sourceType);
+        }
+      }
+    };
     try {
-      stage = carlifecodec.startCapture(opts, frameCb, errCb);
+      stage = carlifecodec.startCapture(opts, frameCb, errCb, audioCb);
     } catch (e) {
       const err = e as Error;
       this.lastErrorMsg = `startCapture 抛异常: ${err.message}`;
@@ -207,6 +245,64 @@ export class ScreenCaptureSource implements FrameSource {
     } catch (e) {
       const err = e as Error;
       CarLifeRuntime.addLog(`[投屏] 停止异常: ${err.message}`);
+    }
+  }
+
+  /**
+   * ★ 设置采集区域（「小窗口投屏」）。
+   *
+   * 只把屏幕上一块矩形推给车机，其余部分不上车机 —— 用户可以把本应用
+   * 拖成悬浮小窗，手机其他区域照常使用其他 App。
+   *
+   * @param x,y 区域左上角（**屏幕坐标 px**，取自 `windowRect`）
+   * @returns 0 成功；-1 参数非法；-2 采集未就绪（区域已缓存）；-3 系统拒绝
+   *
+   * ⚠ 两个已知待真机确认的点：
+   *   1. 区域与编码画布（车机下发的 1280x720）宽高比不一致时，画面可能被
+   *      拉伸变形 —— 把小窗拖成接近 16:9 可规避；
+   *   2. `windowRect` 与采集器坐标系是否严格同口径（DPI/旋转），需实测。
+   */
+  setCaptureArea(x: number, y: number, width: number, height: number): number {
+    const xi: number = Math.max(0, Math.round(x));
+    const yi: number = Math.max(0, Math.round(y));
+    const wi: number = Math.round(width);
+    const hi: number = Math.round(height);
+    if (wi <= 0 || hi <= 0) {
+      return -1;
+    }
+
+    let ret: number = -1;
+    try {
+      ret = carlifecodec.setCaptureArea(xi, yi, wi, hi);
+    } catch (e) {
+      const err = e as Error;
+      CarLifeRuntime.addLog(`[投屏] 设置采集区域异常: ${err.message}`);
+      return -1;
+    }
+
+    if (ret === 0 || ret === -2) {
+      // -2 = 采集尚未就绪，但 native 已缓存区域，下次启动会生效
+      const a: CaptureArea = { x: xi, y: yi, width: wi, height: hi };
+      this.area = a;
+      CarLifeRuntime.addLog(`[投屏] 采集区域 → ${wi}x${hi} @(${xi},${yi})`
+        + (ret === -2 ? '（采集未就绪，已缓存）' : ''));
+    } else {
+      CarLifeRuntime.addLog(`[投屏] ✗ 设置采集区域失败 ret=${ret}`);
+    }
+    return ret;
+  }
+
+  /** 清除采集区域、恢复整屏（内部会重建采集实例） */
+  clearCaptureArea(): number {
+    this.area = null;
+    try {
+      const ret: number = carlifecodec.clearCaptureArea();
+      CarLifeRuntime.addLog(`[投屏] 已恢复整屏采集 ret=${ret}`);
+      return ret;
+    } catch (e) {
+      const err = e as Error;
+      CarLifeRuntime.addLog(`[投屏] 清除采集区域异常: ${err.message}`);
+      return -1;
     }
   }
 

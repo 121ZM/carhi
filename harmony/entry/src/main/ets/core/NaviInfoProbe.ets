@@ -120,6 +120,11 @@ export class NaviInfoProbe {
     });
   }
 
+  /** 高德地图 / 导航共用已配置的应用 Key，不在页面层重复存放。 */
+  static apiKey(): string {
+    return AMAP_KEY;
+  }
+
   /** ★ 取数据桥实例（供页面读取快照 / 挂观察者） */
   static bridgeInstance(): AmapNaviBridge | null {
     return NaviInfoProbe.bridge;

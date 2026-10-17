@@ -46,8 +46,11 @@ import { WifiDirectCard } from './WifiDirectCard';
 import { NaviInfoProbe } from '../core/NaviInfoProbe';
 import { mapAmapIconToTurnType, turnTypeActionText } from '../core/AmapIconMapper';
 import { AmapNaviPage } from './AmapNaviPage';
+import { MapPage } from './MapPage';
 import { ScreenCaptureSource } from '../core/ScreenCaptureSource';
 import { image } from '@kit.ImageKit';
+import { display, floatView, window } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import carlifecodec from 'libcarlifecodec.so';
 
 /** SectionCard 未传内容时的占位（@BuilderParam 需要默认值） */
@@ -140,6 +143,19 @@ export class EngineHolder {
       return false;   // 未新建，调用方据此判断
     }
     const eng = new CarLifeEngine(listener);
+    // ★ 音频通路：把保活采集拿到的内录 PCM 转给引擎发车机（Ch3/9240）。
+    //   官方 SDK 的 FEATURE_CONFIG_AUDIO_TRANSMISSION_MODE 默认 0 = 专用音频通道。
+    //   采集参数 = NativeHmiSource 里 KeepAliveCapture 的配置（48000Hz/2ch），
+    //   位深按 OH_AVScreenCapture 原始流惯例假设 16bit —— 待真机用 buffer 尺寸核实。
+    //   startAudioStream 每帧都调但**幂等**（已 INIT 则直接返回），这样
+    //   画面源切换/通道重连后第一帧就能自动补 INIT，不依赖外部标志位。
+    CarLifeRuntime.audioSink = (pcm: Uint8Array, timestampUs: number, sourceType: number) => {
+      if (sourceType !== 1) {
+        return;   // 只发内录（系统播放音频）
+      }
+      eng.startAudioStream(48000, 2, 16);
+      eng.sendAudioFrame(pcm, timestampUs);
+    };
     // 把画布来源接进引擎：车机确认开始推流时，引擎通过这个工厂拿画面产出者。
     // ★ 若已设置「强制画面源」（应用投屏），就用它 —— 于是车机看到的是手机屏幕。
     eng.setFrameSourceFactory(() => {
@@ -159,6 +175,8 @@ export class EngineHolder {
     EngineHolder.inst?.stop();
     EngineHolder.inst = null;
     EngineHolder.listenerRef = null;
+    // 解除音频 sink：旧引擎已停，别让画面源（可能还在跑）继续往它发
+    CarLifeRuntime.audioSink = null;
     // 注意：**不销毁 src**。它持有 surfaceId，页面重建后还要复用。
   }
 }
@@ -240,6 +258,24 @@ struct Index {
   /** 采集源实例（全局唯一，与自绘源互斥） */
   private castSrc: ScreenCaptureSource | null = null;
 
+  // ---- ★ 小窗投屏（只投本应用当前窗口那一块）----
+  //
+  // 为什么这么做：应用**不能**自建全局悬浮窗（FLOAT_VIEW 等权限要求系统应用，
+  // 声明后装机直接失败 9568289，见 EntryAbility.ets 的实测注释）。可行路径是
+  // 用户用系统「智慧多窗」把本应用拖成悬浮小窗，然后只把这块矩形推给车机 ——
+  // 手机其余部分照常使用其他 App。
+  @State regionOnly: boolean = false;
+  @State regionText: string = '';
+  /** 窗口矩形监听（`window.on` 返回 void，这里只记是否已注册） */
+  private regionWin: window.Window | null = null;
+  private regionWatching: boolean = false;
+  /** 独立投屏子窗口（null = 未打开） */
+  private castWin: window.Window | null = null;
+  /** 系统级悬浮窗控制器（floatView；null = 未使用） */
+  private floatCtl: floatView.FloatViewController | null = null;
+  /** 投屏窗口是否已打开（★ 必须镜像成 @State 才会驱动 UI 刷新） */
+  @State castWinOpen: boolean = false;
+
   /**
    * ★ 采集存活诊断（2026-10-15 新增）。
    *
@@ -269,6 +305,10 @@ struct Index {
   // ---- A3′：高德原生导航页（画面由高德渲染）----
   /** 是否显示高德导航页（全屏覆盖在设置页上） */
   @State showAmapNavi: boolean = false;
+  /** 是否显示高德 MapView 真地图页 */
+  @State showRealMap: boolean = false;
+  /** 是否由真地图页发起了当前投屏；退出地图时只停止本页启动的投屏 */
+  private realMapStartedCast: boolean = false;
   /** 导航起终点（默认北京西站 → 天安门，便于验证） */
   @State amapStartLat: number = 39.894911;
   @State amapStartLng: number = 116.322220;
@@ -449,6 +489,24 @@ struct Index {
         .width('100%')
         .height('100%')
         .id('amap_navi_root')       // ★ 截图目标（页面喂图模式）
+      }
+
+      // ★ 真地图页：MapViewComponent 原生渲染；需要显示到车机时由本页显式开启整屏投屏。
+      if (this.showRealMap) {
+        Column() {
+          MapPage({
+            castActive: this.castRunning,
+            onExit: () => {
+              this.closeRealMapPage();
+            },
+            onToggleCast: () => {
+              this.toggleRealMapCast();
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .id('real_map_root')
       }
     }
     .width('100%')
@@ -789,6 +847,16 @@ struct Index {
               this.openAmapNaviPage();
             })
 
+          Button('真地图预览（高德 MapView）')
+            .fontSize(12)
+            .height(34)
+            .width('100%')
+            .backgroundColor('#0F6CBD')
+            .fontColor('#FFFFFF')
+            .onClick(() => {
+              this.openRealMapPage();
+            })
+
           // ★★★★ 应用投屏：采集屏幕（可录到手机上的高德 App）→ 推车机
           //   与官方 CarLife 同机制（OH_AVScreenCapture）。首次会弹系统授权框，点「允许」即可。
           Button(this.castRunning ? '■ 停止应用投屏' : '📱 应用投屏（录屏推车机）')
@@ -809,6 +877,34 @@ struct Index {
             Text(this.castText)
               .fontSize(11)
               .fontColor('#C9D1D9')
+              .width('100%')
+          }
+
+          // ---- ★ 独立投屏窗口：主窗口保持设置页，另开一个 16:9 横屏窗口投地图 ----
+          //   为什么不用悬浮窗：FLOAT_VIEW 是 system_basic 级权限，普通签名证书没有
+          //   对应 ACL，声明即装机失败 9568289。子窗口**不需要任何权限**。
+          Button(this.castWinOpen ? '🪟 关闭独立投屏窗口' : '🪟 独立投屏窗口（主窗口不变）')
+            .fontSize(12)
+            .height(34)
+            .width('100%')
+            .backgroundColor(this.castWinOpen ? '#DA3633' : '#238636')
+            .fontColor('#FFFFFF')
+            .onClick(() => {
+              this.toggleCastWindow();
+            })
+
+          if (this.regionText.length > 0) {
+            Text(this.regionText)
+              .fontSize(11)
+              .fontColor('#8B949E')
+              .width('100%')
+          }
+
+          if (this.castWinOpen) {
+            Text('车机只显示这个 16:9 独立窗口（地图），主窗口可继续操作设置。'
+              + '切到其他 App 时该窗口会随应用一起不可见 —— 要真正浮在别人之上需系统级悬浮窗权限。')
+              .fontSize(10)
+              .fontColor('#8B949E')
               .width('100%')
           }
 
@@ -1654,8 +1750,401 @@ struct Index {
     CarLifeRuntime.addLog(`[投屏] 启动结果 ok=${ok} castRunning=${this.castRunning}`);
     if (this.castRunning) {
       this.startCastWatchdog();
+      // ★ 小窗模式：投屏一启动就把采集区域锁到「当前窗口」。
+      //   必须在采集真正起来之后调用（native 侧要求 capture 实例已 Init）。
+      if (this.regionOnly) {
+        this.applyRegionFromWindow();
+      }
     }
     AppStorage.setOrCreate<boolean>('carhiFloatOn', this.castRunning);
+  }
+
+  // ================= ★ 小窗投屏：只投本应用窗口那一块 =================
+  //
+  // 原理：`OH_AVScreenCapture_SetCaptureArea`（API 20+）可以只采集屏幕上的一块矩形。
+  // 用户用系统「智慧多窗」把本应用拖成悬浮小窗后，把该小窗的 `windowRect` 交给
+  // 采集器，车机就只看到这块内容，手机其余部分照常使用其他 App。
+  //
+  // ⚠ 应用**自己开不了**全局悬浮窗（FLOAT_VIEW 等权限要求系统应用，实测声明后
+  //   装机直接失败 9568289），所以「小窗」只能由用户手动拖出来 —— 这不是缺陷，
+  //   是权限边界。全屏时开本功能等于整屏采集（区域 = 整屏），不会有副作用。
+
+  /** 把当前窗口矩形下发给采集器（采集未就绪时 native 会缓存，下次启动生效） */
+  private async applyRegionFromWindow(): Promise<void> {
+    const src = this.castSrc;
+    if (src === null) {
+      this.regionText = '尚未创建采集源（请先开始投屏）';
+      return;
+    }
+    try {
+      const win: window.Window = await window.getLastWindow(getContext(this));
+      const rect: window.Rect = win.getWindowProperties().windowRect;
+      const ret: number = src.setCaptureArea(rect.left, rect.top, rect.width, rect.height);
+      if (ret === 0 || ret === -2) {
+        this.regionText = `只投 ${Math.round(rect.width)}x${Math.round(rect.height)}`
+          + ` @(${Math.round(rect.left)},${Math.round(rect.top)})`
+          + (ret === -2 ? '（采集未就绪，已缓存）' : '');
+      } else {
+        this.regionText = `区域设置失败 ret=${ret}（设备可能不支持区域采集）`;
+        CarLifeRuntime.addLog(`[小窗投屏] ${this.regionText}`);
+      }
+    } catch (e) {
+      const err = e as Error;
+      this.regionText = `取窗口矩形失败：${err.message}`;
+      CarLifeRuntime.addLog(`[小窗投屏] ${this.regionText}`);
+    }
+  }
+
+  /**
+   * ★ 小窗横屏：把悬浮小窗调成 16:9 横屏，与车机 1280×720 同比例。
+   *
+   * 为什么必须等 FLOATING：`window.resize()` / `moveWindowTo()` 的官方语义是
+   * **只在悬浮窗（FLOATING）模式下生效**，主窗口全屏时调用直接报 1300002。
+   * 而普通应用**无法自己**把主窗口变成悬浮窗（`FLOAT_VIEW` 等权限要求系统应用，
+   * 声明后装机失败 9568289），所以这一步的前提是用户先用系统「智慧多窗」
+   * 把本应用拖成小窗 —— 拖好之后本方法会自动接管。
+   *
+   * 做成 16:9 的意义：区域采集的宽高比与车机画布一致 ⇒ **不变形、无黑边**，
+   * 也就绕开了 `StrategyForFillMode` 的取舍。
+   */
+  private async applySmallWindowLandscape(): Promise<void> {
+    try {
+      const win: window.Window = await window.getLastWindow(getContext(this));
+      const status: window.WindowStatusType = win.getWindowStatus();
+      if (status !== window.WindowStatusType.FLOATING) {
+        this.regionText = '请先用系统「智慧多窗」把本应用拖成悬浮小窗，再打开本开关';
+        CarLifeRuntime.addLog(`[小窗投屏] 窗口状态=${status}（非悬浮窗），跳过横屏设置`);
+        // 全屏时区域即整屏，等价于不限制，但仍然下发一次保持状态一致
+        this.applyRegionFromWindow();
+        return;
+      }
+
+      // ① 内容横屏 —— 方向由运行期代码控制，module.json5 的 orientation 不生效
+      await win.setPreferredOrientation(window.Orientation.LANDSCAPE);
+
+      // ② 调成 16:9。
+      //   ⚠ 基准必须取**屏幕短边**：`setPreferredOrientation` 之后 display 的
+      //   width/height 可能已按横屏互换，直接用 width 会算出一个几乎占满
+      //   整屏（甚至超过屏幕高度）的"小窗"。
+      const d: display.Display = display.getDefaultDisplaySync();
+      const shortSide: number = Math.min(d.width, d.height);
+      const targetW: number = Math.round(shortSide * 0.9);
+      const targetH: number = Math.round(targetW * 9 / 16);
+      let sized: boolean = false;
+      try {
+        await win.resize(targetW, targetH);
+        sized = true;
+      } catch (e) {
+        const err = e as Error;
+        CarLifeRuntime.addLog(`[小窗投屏] resize(${targetW}x${targetH}) 未生效：${err.message}`);
+      }
+
+      if (sized) {
+        try {
+          // 挪到左上方，避开状态栏和底部手势区
+          await win.moveWindowTo(0, Math.round(shortSide * 0.1));
+        } catch (e) {
+          // 移动失败不影响采集（区域会按实际 windowRect 走）
+        }
+      }
+
+      this.regionText = sized
+        ? `小窗已横屏 ${targetW}x${targetH}（16:9）`
+        : `小窗已横屏（尺寸由系统决定）`;
+      CarLifeRuntime.addLog(`[小窗投屏] ${this.regionText}`);
+
+      // ③ 区域跟着新窗口走
+      this.applyRegionFromWindow();
+    } catch (e) {
+      const err = e as Error;
+      this.regionText = `小窗横屏失败：${err.message}`;
+      CarLifeRuntime.addLog(`[小窗投屏] ${this.regionText}`);
+    }
+  }
+
+  /** 恢复竖屏（退出小窗投屏时调用；EntryAbility 启动时设的就是竖屏） */
+  private async restorePortrait(): Promise<void> {
+    try {
+      const win: window.Window = await window.getLastWindow(getContext(this));
+      await win.setPreferredOrientation(window.Orientation.PORTRAIT);
+      CarLifeRuntime.addLog('[小窗投屏] 已恢复竖屏');
+    } catch (e) {
+      CarLifeRuntime.addLog('[小窗投屏] 恢复竖屏失败（忽略）');
+    }
+  }
+
+  // ================= ★ 独立投屏窗口（主窗口保持设置页） =================
+  //
+  // 为什么用子窗口：`window.resize()` / `moveWindowTo()` 只在 FLOATING 模式生效，
+  // 主窗口全屏时调用报 1300002；而 `WindowStage.createSubWindowWithOptions()`
+  // 是普通应用可用的能力，`SubWindowOptions.windowRect` 能在**创建时**直接
+  // 指定位置尺寸 —— 一次做成 16:9，完全不依赖 resize。
+  //
+  // ⚠ 子窗口仍属本应用：切到其他 App 时整个应用不可见，区域采集会录到
+  //   "盖在这块区域上的别的内容"。要浮在别人之上需系统悬浮窗权限（已判死）。
+
+  // ================= ★ 系统级悬浮窗（floatView）—— 能浮在其他 App 之上 =================
+  //
+  // 这是大哥真正要的能力。与此前的判断不同：`floatView` 是 HarmonyOS 26 的官方
+  // ArkUI 能力，**不是** `window.createWindow(TYPE_FLOAT)` 那条需要系统签名的老路。
+  // 它能加载**任意 ArkUI 页面**（`setUIContext(path)`），所以地图放得进去。
+  //
+  // 权限现实（`PermissionDefinitions.json` 实证）：
+  //   - `floatView.create()`  → 无权限要求
+  //   - `floatView.start()`   → 需要 `ohos.permission.FLOAT_VIEW`
+  //   - `floatView.bind()`    → 还需 `ohos.permission.USE_FLOAT_BALL`
+  //   `FLOAT_VIEW` = user_grant + **system_basic** ⇒ 普通签名证书没有对应 ACL，
+  //   在 AGC 申请受限权限通过前**不能写进 module.json5**（否则装机失败 9568289）。
+  //
+  // 所以这里全程抛错：没权限就由 `openCastWindow` 降级到应用子窗口。
+  // 权限批下来后，只需在 module.json5 加一条 requestPermissions，本路径自动生效。
+
+  /** 打开系统级悬浮窗（需要 FLOAT_VIEW；失败即抛错，由上层降级） */
+  private async openFloatWindow(): Promise<void> {
+    if (!floatView.isFloatViewEnabled()) {
+      throw new Error('本设备不支持应用悬浮窗（isFloatViewEnabled=false）');
+    }
+    const d: display.Display = display.getDefaultDisplaySync();
+    const shortSide: number = Math.min(d.width, d.height);
+    const w: number = Math.round(shortSide * 0.9);
+    const h: number = Math.round(w * 9 / 16);
+
+    const cfg: floatView.FloatViewConfiguration = {
+      context: getContext(this),
+      templateType: floatView.FloatViewTemplateType.ROUNDED_RECTANGLE,
+      isConfirmOnClose: false
+    };
+    const ctl: floatView.FloatViewController = await floatView.create(cfg);
+
+    // ① 挂载地图页
+    await ctl.setUIContext('pages/CastWindow');
+
+    // ② 尺寸做成 16:9，与车机 1280×720 同比例
+    try {
+      const size: window.Size = { width: w, height: h };
+      await ctl.setWindowSize(size);
+    } catch (e) {
+      CarLifeRuntime.addLog('[悬浮窗] 尺寸设置失败（用系统默认）');
+    }
+
+    // ③ 启动 —— 这一步需要 FLOAT_VIEW，没权限会抛 201
+    await ctl.start();
+    this.floatCtl = ctl;
+
+    // ④ 拿实际窗口矩形 → 区域采集；并监听拖动/缩放
+    const props: floatView.FloatViewProperties = ctl.getWindowProperties();
+    const r: window.Rect = props.windowRect;
+    this.regionOnly = true;
+    this.regionText = `系统悬浮窗 ${Math.round(r.width)}x${Math.round(r.height)}`
+      + ` @(${Math.round(r.left)},${Math.round(r.top)})`;
+    const src = this.castSrc;
+    if (src !== null) {
+      src.setCaptureArea(r.left, r.top, r.width, r.height);
+    }
+    try {
+      ctl.onRectChange((info: floatView.FloatViewRectChangeInfo) => {
+        const rr: window.Rect = info.windowRect;
+        const s2 = this.castSrc;
+        if (s2 !== null) {
+          s2.setCaptureArea(rr.left, rr.top, rr.width, rr.height);
+        }
+      });
+    } catch (e) {
+      CarLifeRuntime.addLog('[悬浮窗] 矩形变化监听注册失败');
+    }
+    CarLifeRuntime.addLog(`[悬浮窗] ★ 已启动 ${this.regionText}`);
+  }
+
+  /** 打开独立投屏窗口（16:9 横屏，加载地图页），并把采集区域锁到它 */
+  private async openCastWindow(): Promise<void> {
+    if (this.castWin !== null || this.floatCtl !== null) {
+      this.regionText = '投屏窗口已打开';
+      return;
+    }
+
+    // ① 优先系统级悬浮窗：能浮在其他 App 之上，手机可同时用别的 App。
+    //    没权限（FLOAT_VIEW 未在 AGC 申请到 ACL）时 start() 抛 201，自动降级。
+    try {
+      await this.openFloatWindow();
+      this.castWinOpen = true;
+      return;
+    } catch (e) {
+      const ferr = e as Error;
+      CarLifeRuntime.addLog(`[投屏窗口] 悬浮窗不可用：${ferr.message} → 降级为应用子窗口`);
+    }
+
+    // ② 降级：应用子窗口（不需要任何权限，但切到别的 App 时不可见）
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const d: display.Display = display.getDefaultDisplaySync();
+      const shortSide: number = Math.min(d.width, d.height);
+      const w: number = Math.round(shortSide * 0.9);
+      const h: number = Math.round(w * 9 / 16);
+      const rect: window.Rect = {
+        left: 0,
+        top: Math.round(shortSide * 0.1),
+        width: w,
+        height: h
+      };
+
+      const options: window.SubWindowOptions = {
+        title: '投屏画面',
+        decorEnabled: false,
+        windowRect: rect
+      };
+      const sub: window.Window =
+        await ctx.windowStage.createSubWindowWithOptions('carhi_cast', options);
+      this.castWin = sub;
+
+      await sub.loadContent('pages/CastWindow');
+      try {
+        await sub.setPreferredOrientation(window.Orientation.LANDSCAPE);
+      } catch (e) {
+        CarLifeRuntime.addLog('[投屏窗口] 方向设置失败（忽略）');
+      }
+
+      this.regionOnly = true;
+      this.castWinOpen = true;
+      this.regionText = `独立投屏窗口 ${w}x${h}（16:9）`;
+      CarLifeRuntime.addLog(`[投屏窗口] 已打开 ${w}x${h} @(${rect.left},${rect.top})`);
+
+      // 采集区域 = 子窗口矩形
+      const src = this.castSrc;
+      if (src !== null) {
+        src.setCaptureArea(rect.left, rect.top, rect.width, rect.height);
+      }
+    } catch (e) {
+      const err = e as Error;
+      this.regionText = `投屏窗口打开失败：${err.message}`;
+      CarLifeRuntime.addLog(`[投屏窗口] ✗ ${this.regionText}`);
+      this.castWin = null;
+      this.castWinOpen = false;
+    }
+  }
+
+  /** 关闭独立投屏窗口并恢复整屏采集 */
+  private async closeCastWindow(): Promise<void> {
+    // 系统悬浮窗优先关（它可能正在生效）
+    const ctl = this.floatCtl;
+    this.floatCtl = null;
+    if (ctl !== null) {
+      try {
+        await ctl.stop();
+        CarLifeRuntime.addLog('[悬浮窗] 已停止');
+      } catch (e) {
+        const err = e as Error;
+        CarLifeRuntime.addLog(`[悬浮窗] 停止失败：${err.message}`);
+      }
+    }
+
+    const w = this.castWin;
+    this.castWin = null;
+    this.castWinOpen = false;
+    if (w !== null) {
+      try {
+        await w.destroyWindow();
+        CarLifeRuntime.addLog('[投屏窗口] 已关闭');
+      } catch (e) {
+        const err = e as Error;
+        CarLifeRuntime.addLog(`[投屏窗口] 关闭失败：${err.message}`);
+      }
+    }
+    this.regionOnly = false;
+    const src = this.castSrc;
+    if (src !== null) {
+      src.clearCaptureArea();
+    }
+    this.regionText = '';
+  }
+
+  /** 开关独立投屏窗口 */
+  private toggleCastWindow(): void {
+    if (this.castWin !== null) {
+      this.closeCastWindow();
+    } else {
+      this.openCastWindow();
+    }
+  }
+
+  /** 监听窗口尺寸/位置变化 —— 拖动或缩放小窗时区域实时跟随 */
+  private startRegionWatch(): void {
+    if (this.regionWin !== null) {
+      return;
+    }
+    window.getLastWindow(getContext(this)).then((win: window.Window) => {
+      this.regionWin = win;
+      try {
+        win.on('windowSizeChange', (size: window.Size) => {
+          if (this.regionOnly) {
+            this.applyRegionFromWindow();
+          }
+        });
+      } catch (e) {
+        CarLifeRuntime.addLog('[小窗投屏] windowSizeChange 监听注册失败');
+      }
+      try {
+        win.on('windowRectChange', (data: window.RectChangeOptions) => {
+          if (this.regionOnly) {
+            this.applyRegionFromWindow();
+          }
+        });
+      } catch (e) {
+        CarLifeRuntime.addLog('[小窗投屏] windowRectChange 监听注册失败');
+      }
+      try {
+        // ★ 用户把应用拖成悬浮小窗时自动接管：切横屏 + 调成 16:9
+        win.on('windowStatusChange', (status: window.WindowStatusType) => {
+          CarLifeRuntime.addLog(`[小窗投屏] 窗口状态变化 → ${status}`);
+          if (this.regionOnly && status === window.WindowStatusType.FLOATING) {
+            this.applySmallWindowLandscape();
+          }
+        });
+      } catch (e) {
+        CarLifeRuntime.addLog('[小窗投屏] windowStatusChange 监听注册失败');
+      }
+      this.regionWatching = true;
+      CarLifeRuntime.addLog('[小窗投屏] 窗口变化监听已注册');
+    }).catch((e: Error) => {
+      CarLifeRuntime.addLog(`[小窗投屏] 取窗口失败：${e.message}`);
+    });
+  }
+
+  /** 注销窗口监听 */
+  private stopRegionWatch(): void {
+    const win = this.regionWin;
+    if (win === null) {
+      return;
+    }
+    try {
+      win.off('windowSizeChange');
+      win.off('windowRectChange');
+      win.off('windowStatusChange');
+    } catch (e) {
+      // 注销失败不影响功能
+    }
+    this.regionWatching = false;
+    this.regionWin = null;
+  }
+
+  /** 开关「小窗投屏」 */
+  private toggleRegionOnly(): void {
+    this.regionOnly = !this.regionOnly;
+    if (this.regionOnly) {
+      this.startRegionWatch();
+      // 此刻若已是悬浮小窗 → 直接切横屏 + 16:9；否则只提示，
+      // 等用户拖成小窗后由 windowStatusChange 自动接管
+      this.applySmallWindowLandscape();
+      CarLifeRuntime.addLog('[小窗投屏] 已开启：只投本应用窗口区域');
+    } else {
+      this.stopRegionWatch();
+      this.restorePortrait();
+      const src = this.castSrc;
+      if (src !== null) {
+        src.clearCaptureArea();
+      }
+      this.regionText = '';
+      CarLifeRuntime.addLog('[小窗投屏] 已关闭：恢复整屏采集');
+    }
   }
 
   // ================= ★ 采集存活看门狗（2026-10-15） =================
@@ -1759,6 +2248,12 @@ struct Index {
 
   private stopAppCast(): void {
     this.stopCastWatchdog();
+    // 独立投屏窗口随采集一起关掉（否则窗口还在但画面不更新，看着像卡死）
+    if (this.castWin !== null) {
+      this.closeCastWindow();
+    }
+    // 小窗投屏：停采集时撤掉窗口监听，但**保留开关状态**（下次投屏自动恢复区域）
+    this.stopRegionWatch();
     if (this.castSrc !== null) {
       this.castSrc.stop();
     }
@@ -1774,6 +2269,37 @@ struct Index {
     }
     CarLifeRuntime.addLog('[投屏] 已停止采集，画面源切回自绘');
     AppStorage.setOrCreate<boolean>('carhiFloatOn', false);
+  }
+
+  /** 打开高德 MapView 真地图（道路底图在手机本机原生渲染）。 */
+  private openRealMapPage(): void {
+    if (this.showAmapNavi) {
+      this.closeAmapNaviPage();
+    }
+    this.realMapStartedCast = false;
+    this.showRealMap = true;
+    CarLifeRuntime.addLog('[真地图] MapView 页面已打开；车机显示需在地图页显式点「投屏到车机」');
+  }
+
+  /** 地图页内显式启停整屏投屏；屏幕采集授权仍由系统弹窗确认。 */
+  private toggleRealMapCast(): void {
+    if (this.castRunning) {
+      this.stopAppCast();
+      this.realMapStartedCast = false;
+      return;
+    }
+    this.startAppCast();
+    this.realMapStartedCast = this.castRunning;
+  }
+
+  /** 退出地图时，只关闭由地图页自己开启的投屏。 */
+  private closeRealMapPage(): void {
+    if (this.realMapStartedCast && this.castRunning) {
+      this.stopAppCast();
+    }
+    this.realMapStartedCast = false;
+    this.showRealMap = false;
+    CarLifeRuntime.addLog('[真地图] MapView 页面已关闭');
   }
 
   /**

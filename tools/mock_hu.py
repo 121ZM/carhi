@@ -25,6 +25,10 @@
   Ch1/Ch6 (8 字节头)：[uint16 len][uint16 reserved][uint32 service_type] + payload
   其它通道 (12 字节头)：[uint32 len][uint32 seq_or_ts][uint32 service_type] + payload
 
+音频校验（2026-10-16 加）：AUDIO(9240) 上核对 MEDIA_INIT(CarlifeMusicInit 字段)
+  + MEDIA_DATA(PCM) 的顺序与帧大小。注意：若手机当时没有音频播放，
+  内录采集不产 buffer，INIT/DATA 都不会来 —— 这属正常（只告警不判失败）。
+
 用法：
   python tools/mock_hu.py --host 192.168.0.186 --duration 20
   python tools/mock_hu.py --host 192.168.0.186 --strict    # 有校验失败则退出码非 0
@@ -64,6 +68,20 @@ MD_VIDEO_ENCODER_INIT_DONE = 65551
 MD_FOREGROUND = 65563
 VIDEO_DATA = 131073
 
+# 媒体音频（Ch3/9240）—— 手机 -> 车机
+# ★ 数值按官方两个来源核对（2026-10-16）：
+#   - 官方 Android 车机端 CommonParams.java（Apollo-DuerOS/CarLife-Android-Vehicle）
+#   - 官方跨平台 C++ 车机库 CTranRecvPackageProcess.h（CarLife-Vehicle-Lib）
+# 两者一致：INIT=0x30001 / STOP=0x30002 / PAUSE=0x30003 /
+#           RESUME_PLAY=0x30004 / SEEK_TO=0x30005 / DATA=0x30006。
+# ⚠️ 本仓库 ArkTS 侧 Constants.ets 曾把 DATA/STOP 写反，已按此修正。
+MEDIA_INIT = 0x00030001     # 196609 CarlifeMusicInit
+MEDIA_STOP = 0x00030002     # 196610
+MEDIA_PAUSE = 0x00030003    # 196611
+MEDIA_RESUME_PLAY = 0x00030004   # 196612
+MEDIA_SEEK_TO = 0x00030005  # 196613
+MEDIA_DATA = 0x00030006     # 196614 PCM 裸流
+
 NAMES = {
     HU_PROTOCOL_VERSION: "HU_PROTOCOL_VERSION",
     HU_STATISTICAL_INFO: "HU_STATISTICAL_INFO",
@@ -86,6 +104,12 @@ NAMES = {
     MD_VIDEO_ENCODER_INIT_DONE: "MD_VIDEO_ENCODER_INIT_DONE",
     MD_FOREGROUND: "MD_FOREGROUND",
     VIDEO_DATA: "VIDEO_DATA",
+    MEDIA_INIT: "MEDIA_INIT",
+    MEDIA_STOP: "MEDIA_STOP",
+    MEDIA_PAUSE: "MEDIA_PAUSE",
+    MEDIA_RESUME_PLAY: "MEDIA_RESUME_PLAY",
+    MEDIA_SEEK_TO: "MEDIA_SEEK_TO",
+    MEDIA_DATA: "MEDIA_DATA",
 }
 
 # ─────────────── 官方 proto 字段表（照 refs/carlife_proto 抄） ───────────────
@@ -128,6 +152,12 @@ SCHEMAS = {
     MD_VIDEO_ENCODER_INIT_DONE: ("(无独立 proto，空体或简单体)", {}),
     MD_VIDEO_FRAME_RATE: ("CarlifeVideoFrameRate", {1: ("frameRate", "int")}),
     MD_FOREGROUND: ("(无独立 proto)", {}),
+    # CarlifeMusicInitProto.proto：sampleRate=1, channelConfig=2, sampleFormat=3（均 required int32）
+    MEDIA_INIT: ("CarlifeMusicInit", {
+        1: ("sampleRate", "int"),
+        2: ("channelConfig", "int"),
+        3: ("sampleFormat", "int"),
+    }),
 }
 
 
@@ -243,7 +273,7 @@ class Channel:
         self.sock = None
         self.alive = False
         self.rx_bytes = 0
-        self.rx_msgs = []          # [(service_type, payload_bytes)]
+        self.rx_msgs = []          # [(service_type, payload_bytes, recv_time)]
         self._lock = threading.Lock()
 
     def connect(self) -> bool:
@@ -280,7 +310,7 @@ class Channel:
                     payload = bytes(buf[hdr:hdr + plen])
                     del buf[:hdr + plen]
                     with self._lock:
-                        self.rx_msgs.append((stype, payload))
+                        self.rx_msgs.append((stype, payload, time.time()))
                     if stype != VIDEO_DATA:   # 视频帧太密，不逐条打印
                         print(f"[{self.label}] <- {NAMES.get(stype, hex(stype))}"
                               f" (ID={stype}, len={plen})")
@@ -307,7 +337,7 @@ class Channel:
         end = time.time() + timeout
         while time.time() < end:
             with self._lock:
-                for st, pl in self.rx_msgs:
+                for st, pl, _t in self.rx_msgs:
                     if st == service_type:
                         return pl
             time.sleep(0.05)
@@ -518,12 +548,16 @@ def main() -> int:
     deadline = time.time() + args.duration
     sent = 0
     last = time.time()
+    last_hb_at = time.time()      # 最近一次 VIDEO 心跳的发送时刻（判 MEDIA_STOP 归属用）
+    alive_at_end = {}             # 心跳循环退出瞬间的各通道存活快照（拆链前一刻）
+    stopped_by_disconnect = False
     print(f"[INFO] 心跳 131074 @ {args.hb_hz}/s，持续 {args.duration}s")
 
     try:
         while time.time() < deadline and cmd.alive:
             video.send(VIDEO_HEARTBEAT)
             sent += 1
+            last_hb_at = time.time()
             now = time.time()
             if now - last >= 10.0:
                 with video._lock:
@@ -532,6 +566,10 @@ def main() -> int:
                       f" | CMD 收 {cmd.rx_bytes}B | alive cmd={cmd.alive} video={video.alive}")
                 last = now
             time.sleep(interval)
+        stopped_by_disconnect = not cmd.alive
+        # ★ 快照必须赶在 finally 的 sleep 之前：mock 停止心跳后手机/代理会在
+        #   极短时间内拆链，等 0.3s 再取 alive 会把正常的拆链时序误判成掉线。
+        alive_at_end = {c.label: c.alive for c in [cmd, video] + extra}
     except KeyboardInterrupt:
         print("\n[INFO] 中断")
     finally:
@@ -543,7 +581,7 @@ def main() -> int:
     with cmd._lock:
         cmsgs = list(cmd.rx_msgs)
 
-    frames = [pl for st, pl in vmsgs if st == VIDEO_DATA]
+    frames = [pl for st, pl, _t in vmsgs if st == VIDEO_DATA]
     rep.check(len(frames) > 0, f"VIDEO(8240) 收到 {VIDEO_DATA} 视频帧", f"共 {len(frames)} 帧")
     if frames:
         sizes = sorted(len(f) for f in frames)
@@ -555,18 +593,75 @@ def main() -> int:
                   "视频流含 H.264 Annex-B 起始码",
                   "找到 00 00 00 01 或 00 00 01", warn_only=True)
 
-    fg = [pl for st, pl in cmsgs if st == MD_FOREGROUND]
+    fg = [pl for st, pl, _t in cmsgs if st == MD_FOREGROUND]
     rep.check(len(fg) > 0, f"CMD(7240) 周期性上报 {MD_FOREGROUND} MD_FOREGROUND（保活）",
               f"共 {len(fg)} 条 —— 车机端要求 5 秒内收到任意消息")
 
+    # ── 10b. 音频通路校验（MEDIA_INIT + MEDIA_DATA，Ch3/9240）──
+    # 官方依据：CommonParams.java / CTranRecvPackageProcess.h（0x0003 块），
+    # 字段见 CarlifeMusicInitProto.proto；HU 侧映射：
+    #   channelConfig 1=mono / 2=stereo；sampleFormat 8=PCM8 / 16=PCM16。
+    audio = next((c for c in extra if c.label == "AUDIO"), None)
+    if audio is not None:
+        with audio._lock:
+            amsgs = list(audio.rx_msgs)
+        init_idx_list = [i for i, (st, _, _t) in enumerate(amsgs) if st == MEDIA_INIT]
+        data_frames = [(i, pl) for i, (st, pl, _t) in enumerate(amsgs) if st == MEDIA_DATA]
+        stop_events = [(i, t) for i, (st, _, t) in enumerate(amsgs) if st == MEDIA_STOP]
+        stop_count = len(stop_events)
+        if init_idx_list:
+            init_idx = init_idx_list[-1]
+            d = pb_to_dict(amsgs[init_idx][1], MEDIA_INIT)
+            rep.check(d.get("sampleRate", 0) > 0 and d.get("channelConfig", 0) in (1, 2)
+                      and d.get("sampleFormat", 0) in (8, 16),
+                      "MEDIA_INIT(CarlifeMusicInit) 字段合法（HU 映射："
+                      "channelConfig 1=mono/2=stereo，sampleFormat 8/16=位深）",
+                      show("CarlifeMusicInit", d, ["sampleRate", "channelConfig", "sampleFormat"]))
+            rep.check(init_idx < (data_frames[0][0] if data_frames else len(amsgs)),
+                      "MEDIA_INIT 先于所有 MEDIA_DATA 到达（车机靠它建 AudioTrack）",
+                      f"INIT 在第 {init_idx} 条，DATA 共 {len(data_frames)} 帧")
+        else:
+            rep.add("WARN", "未收到 MEDIA_INIT —— 手机当时无音频播放则属正常"
+                            "（内录采集只在有声音时产 buffer）；确有播放无声才算问题")
+        rep.check(len(data_frames) > 0, f"AUDIO(9240) 收到 {MEDIA_DATA} PCM 数据帧",
+                  f"共 {len(data_frames)} 帧 / {sum(len(pl) for _, pl in data_frames)}B")
+        if data_frames:
+            sizes = sorted(len(pl) for _, pl in data_frames)
+            rep.check(0 < sizes[0] and sizes[-1] <= 100 * 1024,
+                      "PCM 帧大小合理（>0 且 ≤ HU 侧 MEDIA_DATA_SIZE=100KB）",
+                      f"最小 {sizes[0]}B / 中位 {sizes[len(sizes)//2]}B / 最大 {sizes[-1]}B")
+            mid = sizes[len(sizes) // 2]
+            rep.check(192 <= mid <= 38400,
+                      "PCM 帧大小与 48kHz/2ch/16bit 的 1~200ms 分片量级吻合",
+                      f"中位 {mid}B（10ms 满帧应为 1920B）", warn_only=True)
+        # ★ MEDIA_STOP 归属判定：只有「mock 还在发视频心跳时」到达的 STOP 才算
+        #   手机侧主动停流（异常）；心跳停止后的 STOP 是正常的拆链收尾
+        #   （实测：mock 到期不发心跳 → 手机很快 STOP 音频并拆链，2026-10-16 真机）。
+        stop_during_stream = [t for _i, t in stop_events if t <= last_hb_at + 0.5]
+        if stop_during_stream:
+            rep.add("WARN", f"推流期间收到 MEDIA_STOP ×{len(stop_during_stream)}"
+                            "（手机侧主动停过音频流；若未操作过即为异常）")
+        elif stop_count > 0:
+            print(f"[INFO] MEDIA_STOP ×{stop_count} 到达于心跳停止后，属正常拆链收尾，不计警告")
+
     # ── 11. 附加通道存活情况 ──
+    # ★ 用「心跳循环退出瞬间」的快照判定，而不是循环结束 0.3s 后的 alive：
+    #   mock 到期停止心跳后，手机/沙箱代理会在极短时间内拆链，晚取会把正常的
+    #   拆链时序误判成"中途掉线"。stopped_by_disconnect=True 才是真掉线。
+    if stopped_by_disconnect:
+        rep.check(False, "推流期间 CMD(7240) 连接被异常断开",
+                  "心跳循环因 cmd.alive=False 提前退出 —— 连接在跑完前就断了")
     if touch is not None:
-        rep.check(touch.alive, "TOUCH(9340) 下发触控后连接仍存活（手机端未因丢包断开）",
-                  f"TOUCH 收 {touch.rx_bytes}B / {len(touch.rx_msgs)} 条")
+        rep.check(alive_at_end.get("TOUCH", touch.alive),
+                  "TOUCH(9340) 下发触控后连接仍存活（手机端未因丢包断开）",
+                  f"TOUCH 收 {touch.rx_bytes}B / {len(touch.rx_msgs)} 条"
+                  f"｜快照 alive={alive_at_end.get('TOUCH')}")
     for c in extra:
         if c.label != "TOUCH":
-            rep.check(c.alive, f"{c.label}({c.port}) 全程保持连接",
-                      f"收 {c.rx_bytes}B / {len(c.rx_msgs)} 条")
+            rep.check(alive_at_end.get(c.label, c.alive),
+                      f"{c.label}({c.port}) 全程保持连接",
+                      f"收 {c.rx_bytes}B / {len(c.rx_msgs)} 条"
+                      f"｜快照 alive={alive_at_end.get(c.label)}")
 
     for c in extra:
         c.close()
