@@ -266,6 +266,16 @@ struct Index {
   // 手机其余部分照常使用其他 App。
   @State regionOnly: boolean = false;
   @State regionText: string = '';
+  /**
+   * ★★ 当前是否处于**系统悬浮小窗**（`WindowStatusType.FLOATING`）。
+   *
+   * 这条路径不靠应用自己开窗，而是用户用系统「智慧多窗」把本应用拖成小窗，
+   * 由 `windowStatusChange` 事件驱动（见 `startRegionWatch`）。声明
+   * `supportWindowMode: [..., "floating"]` 之后系统才允许这么拖。
+   *
+   * 置 true 时整个界面切成**纯地图 16:9**（`floatMode` 分支），否则车机看到的是设置列表。
+   */
+  @State floatMode: boolean = false;
   /** 窗口矩形监听（`window.on` 返回 void，这里只记是否已注册） */
   private regionWin: window.Window | null = null;
   private regionWatching: boolean = false;
@@ -446,6 +456,12 @@ struct Index {
     this.startService().catch((e: Error) => {
       CarLifeRuntime.addLog(`自动启动失败: ${e.message}`);
     });
+
+    // ★★ 窗口监听**无条件注册**（2026-10-18）：
+    //   系统「智慧多窗」把本应用拖成悬浮小窗时会触发 `windowStatusChange`，
+    //   这里必须一直在听，否则用户拖出小窗后应用毫无反应。
+    //   同时兼容旧的手动开关（`regionOnly`）。
+    this.startRegionWatch();
   }
 
   aboutToDisappear(): void {
@@ -467,7 +483,8 @@ struct Index {
       // ★ A3′：高德原生导航页（全屏覆盖）。
       //   打开时高德自己渲染完整导航界面（地图/路线/红绿灯/路口图），
       //   关闭后回到设置页。详见 pages/AmapNaviPage.ets 顶部注释。
-      if (this.showAmapNavi) {
+      //   ★ 小窗模式下不挂载：地图实例只能有一个，两套同时渲染会互相打架。
+      if (!this.floatMode && this.showAmapNavi) {
         Column() {
           AmapNaviPage({
             startLat: this.amapStartLat,
@@ -492,7 +509,8 @@ struct Index {
       }
 
       // ★ 真地图页：MapViewComponent 原生渲染；需要显示到车机时由本页显式开启整屏投屏。
-      if (this.showRealMap) {
+      //   ★ 小窗模式下不挂载（同上：地图实例唯一）。
+      if (!this.floatMode && this.showRealMap) {
         Column() {
           MapPage({
             castActive: this.castRunning,
@@ -507,6 +525,32 @@ struct Index {
         .width('100%')
         .height('100%')
         .id('real_map_root')
+      }
+
+      // ★★ 系统小窗模式：整屏换成**纯地图**。
+      //
+      // 为什么必须换：这块画面会被采集送进车机。如果小窗里还是设置列表，
+      // 车机看到的就是一堆开关和日志。所以 `floatMode` 时把整个界面让给地图。
+      //
+      // `chrome: false` 关掉顶部「返回设置 / 投屏到车机」操作栏 ——
+      // 否则那两个按钮会一起出现在车机上。
+      if (this.floatMode) {
+        Column() {
+          MapPage({
+            chrome: false,
+            castActive: this.castRunning,
+            onExit: () => {
+              // chrome=false 时页面上没有返回按钮，这里只是兜底
+              CarLifeRuntime.addLog('[小窗] 地图页请求退出（忽略：请用系统手势还原窗口）');
+            },
+            onToggleCast: () => {
+              this.toggleRealMapCast();
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#000000')
       }
     }
     .width('100%')
@@ -907,6 +951,32 @@ struct Index {
               .fontColor('#8B949E')
               .width('100%')
           }
+
+          // ---- ★★ 系统小窗投屏（2026-10-18）：靠系统手势拖成悬浮小窗 ----
+          //   这是不需要任何权限就能"边用手机边投屏"的唯一路径。
+          Column({ space: 3 }) {
+            Text(this.floatMode
+              ? '🪟 已进入系统小窗：界面切成 16:9 纯地图，车机只投这块'
+              : '🪟 小窗投屏：用系统「智慧多窗」把本应用拖成悬浮小窗，会自动切 16:9 地图并只投这块')
+              .fontSize(11)
+              .fontColor(this.floatMode ? '#3FB950' : '#8B949E')
+              .width('100%')
+            if (this.floatMode) {
+              Text('拖回全屏即恢复设置页与整屏采集。窗口大小可随意拖，采集区域会自动跟随。')
+                .fontSize(10)
+                .fontColor('#8B949E')
+                .width('100%')
+            } else {
+              Text('前提：本应用已声明支持悬浮模式（module.json5 的 supportWindowMode）。')
+                .fontSize(10)
+                .fontColor('#6E7681')
+                .width('100%')
+            }
+          }
+          .width('100%')
+          .padding({ top: 4, left: 8, right: 8, bottom: 4 })
+          .backgroundColor('#0D1117')
+          .border({ width: 1, color: this.floatMode ? '#238636' : '#21262D', radius: 6 })
 
           // ---- ★ 采集存活诊断（车机上直接看，不用连 USB）----
           //   判读：lastOut 一直涨 = 已断流；fps 长期为 0 = 已断流。
@@ -2066,46 +2136,71 @@ struct Index {
     }
   }
 
-  /** 监听窗口尺寸/位置变化 —— 拖动或缩放小窗时区域实时跟随 */
+  /**
+   * 监听窗口状态/尺寸/位置变化。
+   *
+   * ★ 2026-10-18 起**无条件注册**（`aboutToAppear` 里调用），因为「系统窗口管理」
+   * 这条路径完全由系统手势触发 —— 用户把应用拖成悬浮小窗的那一刻，
+   * 只有 `windowStatusChange` 能通知到我们。
+   */
   private startRegionWatch(): void {
     if (this.regionWin !== null) {
       return;
     }
     window.getLastWindow(getContext(this)).then((win: window.Window) => {
       this.regionWin = win;
+      // 启动时同步一次当前状态：可能应用是**以悬浮窗身份被拉起**的
+      // （例如从小窗状态切到别的 App 再切回来），此时不会再触发 statusChange。
+      try {
+        const st: window.WindowStatusType = win.getWindowStatus();
+        if (st === window.WindowStatusType.FLOATING && !this.floatMode) {
+          CarLifeRuntime.addLog('[小窗] 启动即为悬浮窗 → 直接接管');
+          this.floatMode = true;
+          this.enterFloatMode();
+        }
+      } catch (e) {
+        // 状态查询失败不影响后续监听
+      }
       try {
         win.on('windowSizeChange', (size: window.Size) => {
-          if (this.regionOnly) {
+          if (this.regionOnly || this.floatMode) {
             this.applyRegionFromWindow();
           }
         });
       } catch (e) {
-        CarLifeRuntime.addLog('[小窗投屏] windowSizeChange 监听注册失败');
+        CarLifeRuntime.addLog('[小窗] windowSizeChange 监听注册失败');
       }
       try {
         win.on('windowRectChange', (data: window.RectChangeOptions) => {
-          if (this.regionOnly) {
+          if (this.regionOnly || this.floatMode) {
             this.applyRegionFromWindow();
           }
         });
       } catch (e) {
-        CarLifeRuntime.addLog('[小窗投屏] windowRectChange 监听注册失败');
+        CarLifeRuntime.addLog('[小窗] windowRectChange 监听注册失败');
       }
       try {
-        // ★ 用户把应用拖成悬浮小窗时自动接管：切横屏 + 调成 16:9
+        // ★★ 核心：系统把本应用拖成悬浮小窗 / 拖回全屏时自动接管
         win.on('windowStatusChange', (status: window.WindowStatusType) => {
-          CarLifeRuntime.addLog(`[小窗投屏] 窗口状态变化 → ${status}`);
-          if (this.regionOnly && status === window.WindowStatusType.FLOATING) {
-            this.applySmallWindowLandscape();
+          const isFloat: boolean = status === window.WindowStatusType.FLOATING;
+          CarLifeRuntime.addLog(`[小窗] 窗口状态 → ${status}（悬浮=${isFloat}）`);
+          if (isFloat === this.floatMode) {
+            return;
+          }
+          this.floatMode = isFloat;
+          if (isFloat) {
+            this.enterFloatMode();
+          } else {
+            this.exitFloatMode();
           }
         });
       } catch (e) {
-        CarLifeRuntime.addLog('[小窗投屏] windowStatusChange 监听注册失败');
+        CarLifeRuntime.addLog('[小窗] windowStatusChange 监听注册失败');
       }
       this.regionWatching = true;
-      CarLifeRuntime.addLog('[小窗投屏] 窗口变化监听已注册');
+      CarLifeRuntime.addLog('[小窗] 窗口变化监听已注册');
     }).catch((e: Error) => {
-      CarLifeRuntime.addLog(`[小窗投屏] 取窗口失败：${e.message}`);
+      CarLifeRuntime.addLog(`[小窗] 取窗口失败：${e.message}`);
     });
   }
 
@@ -2126,7 +2221,47 @@ struct Index {
     this.regionWin = null;
   }
 
-  /** 开关「小窗投屏」 */
+  // ================= ★★ 系统小窗（悬浮窗）自动接管 =================
+  //
+  // 这条路径的前提是 module.json5 里声明了 `supportWindowMode: [..., "floating"]`，
+  // 否则系统根本不会把本应用当成"可以拖成小窗"的应用。
+  //
+  // 用户拖成小窗的那一刻：
+  //   ① 界面切成**纯地图 16:9**（`floatMode` 分支），否则车机看到的是设置列表
+  //   ② `setPreferredOrientation(LANDSCAPE)` + `resize(16:9)`（resize 只在 FLOATING 下生效）
+  //   ③ 采集区域锁到该窗口矩形，车机只看到这块
+  // 拖回全屏时全部还原。
+
+  /** 进入系统小窗模式 */
+  private async enterFloatMode(): Promise<void> {
+    CarLifeRuntime.addLog('[小窗] ★ 已进入悬浮窗：切 16:9 横屏 + 锁采集区域');
+    this.regionOnly = true;
+    await this.applySmallWindowLandscape();
+    // 系统切换瞬间的 windowRect 可能还没稳定，稍后再取一次纠偏。
+    // 不用 await：这只是补一次，`windowRectChange` 才是常态跟随。
+    setTimeout(() => {
+      if (this.floatMode) {
+        this.applyRegionFromWindow();
+      }
+    }, 400);
+  }
+
+  /** 退出系统小窗模式（拖回全屏） */
+  private async exitFloatMode(): Promise<void> {
+    CarLifeRuntime.addLog('[小窗] 已退出悬浮窗：恢复竖屏 + 整屏采集');
+    this.regionOnly = false;
+    await this.restorePortrait();
+    // 独立投屏子窗口还开着时不撤区域 —— 那是另一条路径，区域由它自己管
+    if (!this.castWinOpen) {
+      const src = this.castSrc;
+      if (src !== null) {
+        src.clearCaptureArea();
+      }
+      this.regionText = '';
+    }
+  }
+
+  /** 开关「小窗投屏」（手动开关；系统拖拽路径不需要它） */
   private toggleRegionOnly(): void {
     this.regionOnly = !this.regionOnly;
     if (this.regionOnly) {

@@ -16,6 +16,7 @@
 |---|---|---|---|
 | 自绘 HMI（CarWith 卡片） | 默认 | `core/NativeHmiSource.ets` + `cpp/hmi_renderer.cpp` | ✅ 已出图 |
 | 整屏采集 | `📱 应用投屏（录屏推车机）` | `core/ScreenCaptureSource.ets` + `cpp/screen_encoder.cpp` | ✅ 已出图 |
+| 系统小窗（智慧多窗）+ 区域采集 | 系统手势拖成小窗，无需按钮 | `Index.enterFloatMode()` + `SetCaptureArea` | ⏳ 仅编译验证 |
 | 独立投屏窗口 + 区域采集 | `🪟 独立投屏窗口（主窗口不变）` | `pages/CastWindow.ets` + `SetCaptureArea` | ⏳ 仅编译验证 |
 | 音频（PCM → 9240） | 无（自动） | `core/CarLifeEngine.ets` + `cpp/keepalive_capture.cpp` | ✅ 协议层实测通过 |
 
@@ -40,7 +41,37 @@ native 侧用 `OH_Drawing` 自绘车机画面（导航卡、状态栏），直�
 - 采集画布跟随旋转：`SetCanvasRotation(true)` + `StrategyForCanvasFollowRotation(true)`
 - 竖屏内容投到 16:9 车机会被拉伸（`StrategyForFillMode` 目前走系统默认）
 
-### 2.3 独立投屏窗口 + 区域采集（本轮新增）
+### 2.3 系统小窗（智慧多窗）—— 不需要任何权限的"边用手机边投屏"（主推）
+
+**思路**：应用自己不开窗，由用户用系统「智慧多窗」把 CarHi 拖成悬浮小窗；
+应用检测到 `WindowStatusType.FLOATING` 后自动接管，只把这扇小窗推给车机。
+
+前提（`module.json5`，**缺了用户根本拖不出小窗**）：
+
+```json5
+"supportWindowMode": ["fullscreen", "split", "floating"],
+"preferMultiWindowOrientation": "landscape",
+```
+
+接管流程（`Index.startRegionWatch()` → `enterFloatMode()`）：
+
+1. 界面切成**纯地图 16:9**（`build()` 的 `floatMode` 分支）。
+   地图页必须传 `chrome: false` —— 顶部「返回设置 / 投屏到车机」按钮
+   否则会一起被采集进车机画面
+2. `setPreferredOrientation(LANDSCAPE)` + `resize(16:9)`
+   （`resize()` 只在 FLOATING 下生效，全屏调用报 1300002）
+3. `SetCaptureArea` 锁到该窗口矩形；拖动/缩放由 `windowRectChange` 实时跟随
+4. 拖回全屏 → `exitFloatMode()`：恢复竖屏、撤区域、回设置页
+
+两个实现细节：
+
+- `windowStatusChange` 监听**在 `aboutToAppear` 里无条件注册**。系统手势随时可能发生，
+  监听晚一步就完全没反应；启动时还会用 `getWindowStatus()` 补查一次
+  （应用可能**以悬浮窗身份被拉起**，那种情况不会触发状态变化事件）
+- 进入小窗时 `showAmapNavi` / `showRealMap` 会被临时卸载 ——
+  高德地图实例只能有一个，两套同时渲染会互相打架
+
+### 2.4 独立投屏窗口 + 区域采集（应用自建窗口）
 
 **思路**：主窗口保留设置页，另开一个 16:9 窗口专门投屏，采集只取这块区域。
 
@@ -74,7 +105,7 @@ int32_t ClearCaptureArea();
 采集前/采集中都能调；失败时沿用上次区域。区域由采集器在**送 Surface 之前**裁好，
 所以 surface 直通模式不需要改成 buffer 模式再做软件裁剪。
 
-### 2.4 真地图页
+### 2.5 真地图页
 
 | 页面 | 用途 | 渲染方式 |
 |---|---|---|
@@ -143,6 +174,8 @@ PCM 为 **S16LE 交织**，单帧上限按 HU 侧 `MEDIA_DATA_SIZE=100KB` 保守
 | 要启用悬浮窗：AGC 申请受限权限 → 审核通过 → 重签带 ACL 的 profile → 加一条 `requestPermissions`。**代码无需再改**，`openFloatWindow()` 自动生效 | — |
 | 画中画（PiP）**不能**用来投地图 | `PiPConfiguration.componentController: XComponentController` 必填，只能承载 XComponent；且 `PiPWindowInfo` 只有 `{windowId,size}`，无屏幕坐标，无法喂 `SetCaptureArea` |
 | 主窗口自己缩小成小窗做不到 | `resize()` / `moveWindowTo()` 仅 `WindowStatusType.FLOATING` 生效，否则 1300002 |
+| 应用**无法请求**把自己变成悬浮窗 | `@ohos.window` 里没有 `setWindowMode` 类接口；`getWindowStatus()` 只读；`setSupportedWindowModes()` 只声明"允许哪些模式"、不切换。手机的"小窗"由系统智慧多窗/应用助手把整个窗口切成 FLOATING |
+| 视频类 App 的小窗走的是 PiP | 内容天然是 Surface，满足 `componentController: XComponentController`；模板只有 `VIDEO_*` |
 | 应用级采集（只录某个 App）**尚未实现** | `SetPickerMode(OH_CAPTURE_PICKER_MODE_APP_ONLY)` + `PresentPicker()`，API 26 可用 |
 | 无法强制被采集 App 横屏 | 没有任何跨应用方向控制 API；只能用户把手机横过来，让高德自己切车载横屏 |
 
@@ -155,7 +188,10 @@ PCM 为 **S16LE 交织**，单帧上限按 HU 侧 `MEDIA_DATA_SIZE=100KB` 保守
 3. 选画面源：
    - **默认** → 自绘 HMI（CarWith 导航卡）
    - **整屏** → 点「📱 应用投屏（录屏推车机）」，首次授权录屏
-   - **只投一块** → 点「🪟 独立投屏窗口」，车机只显示这个 16:9 窗口；
+   - **系统小窗（推荐）** → 用系统「智慧多窗」把本应用拖成悬浮小窗。
+     应用自动切成 16:9 纯地图、把采集区域锁到这扇小窗；手机其余部分照常用别的 App。
+     拖回全屏即恢复设置页与整屏采集
+   - **应用自建窗口** → 点「🪟 独立投屏窗口」，车机只显示这个 16:9 窗口；
      有 `FLOAT_VIEW` 时为可浮动的系统悬浮窗，没有则降级为应用子窗口（切到别的 App 会不可见）
 4. 音频自动跟随：手机上有声音时，内录 PCM 自动进 9240；无播放则无帧（正常）
 
@@ -165,19 +201,23 @@ PCM 为 **S16LE 交织**，单帧上限按 HU 侧 `MEDIA_DATA_SIZE=100KB` 保守
 
 **待真机验证**（本轮改动只过了编译）：
 
-- ① 区域采集在 surface 直通模式下是否真的只出那一块
-- ② `windowRect` 与采集坐标系（DPI / 旋转）是否同一口径
-- ③ 拖动/缩放窗口时区域能否实时跟随
-- ④ 子窗口 `setPreferredOrientation(LANDSCAPE)` 对内容布局的实际效果
-- ⑤ 系统悬浮窗路径（需 `FLOAT_VIEW` 获批后才能跑）
+- ① **声明 `supportWindowMode` 后系统是否真的提供小窗入口**（这是整条路径的前提）
+- ② 区域采集在 surface 直通模式下是否真的只出那一块
+- ③ `windowRect` 与采集坐标系（DPI / 旋转）是否同一口径
+- ④ 拖动/缩放窗口时区域能否实时跟随
+- ⑤ `setPreferredOrientation(LANDSCAPE)` 在悬浮窗里的实际布局效果
+- ⑥ 系统悬浮窗路径（需 `FLOAT_VIEW` 获批后才能跑）
 
 **已知限制**：
 
-- 子窗口属于本应用，**切到其他 App 时整个应用不可见**，此时区域采集录到的是
+- 应用**自己不能**把主窗口变成悬浮窗：SDK 里没有 `setWindowMode` 之类的接口，
+  `getWindowStatus()` 只读、`resize/moveWindowTo` 只在已处于 FLOATING 时生效。
+  所以小窗必须由用户用系统手势拖出来（这也是视频走 PiP、游戏靠系统窗口管理的原因）
+- 应用子窗口属于本应用，**切到其他 App 时整个应用不可见**，此时区域采集录到的是
   "盖在这块区域上的别的内容"。要真正浮在别人之上必须走系统悬浮窗权限
 - 竖屏内容投 16:9 车机会拉伸（整屏采集路径），应用级采集实现时再引入
   `StrategyForFillMode(ASPECT_SCALE_FIT)`
-- `toggleRegionOnly()` 目前**没有 UI 入口**（按钮已由「独立投屏窗口」取代），保留备用
+- `toggleRegionOnly()` 目前**没有 UI 入口**（系统拖拽已自动接管），保留备用
 - `MapPageCompileProbe.ets` 是早期为了让 `MapPage` 进入编译的探针，
   `MapPage` 已接入 `CastWindow` 与 `Index`，该探针可删除
 
@@ -194,12 +234,17 @@ harmony/entry/src/main/ets/
 │   ├── NaviInfoProbe.ets       改：导航数据桥接
 │   └── ...
 ├── pages/
-│   ├── Index.ets               改：独立投屏窗口、悬浮窗降级、区域跟随、小窗横屏
+│   ├── Index.ets               改：系统小窗自动接管（enterFloatMode/exitFloatMode）、
+│   │                              独立投屏窗口、悬浮窗降级、区域跟随
 │   ├── CastWindow.ets          新增：投屏窗口内容载体
-│   ├── MapPage.ets             新增：高德 MapView 真地图
+│   ├── MapPage.ets             新增：高德 MapView 真地图（`chrome=false` 出纯地图）
 │   └── MapPageCompileProbe.ets 新增：编译探针（可删）
 ├── protocol/Constants.ets      改：MEDIA_* 六个消息 ID（修正 DATA/STOP 写反）
 └── transport/ChannelServer.ets 改：isAudioReady
+
+harmony/entry/src/main/module.json5
+                                改：supportWindowMode [fullscreen,split,floating]
+                                    + preferMultiWindowOrientation landscape
 
 harmony/entry/src/main/cpp/
 ├── keepalive_capture.{h,cpp}   新增：纯音频采集（长时任务保活 + 内录 PCM）

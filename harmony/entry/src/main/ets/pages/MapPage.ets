@@ -90,6 +90,13 @@ export struct MapPage {
   @Prop castActive: boolean = false;
   /** 用户显式开启或停止车机投屏 */
   onToggleCast: () => void = () => {};
+  /**
+   * 是否显示顶部操作栏。
+   *
+   * `false` = **纯地图**：用于「小窗投屏」/ 投屏窗口这类**画面会被送到车机**的场合。
+   * 顶部栏里的「返回设置 / 投屏到车机」按钮如果留着，会一起被采集进车机画面。
+   */
+  chrome: boolean = true;
 
   /** AMap 实例（拿到后才能加覆盖物 / 控相机） */
   private aMap: AMap | null = null;
@@ -251,24 +258,27 @@ export struct MapPage {
       }
 
       // 顶层：操作栏。投屏明确由用户点击触发，系统另会显示屏幕采集授权弹窗。
-      Row({ space: 10 }) {
-        Button('返回设置')
-          .fontSize(12)
-          .onClick(() => this.onExit())
-        Text(this.mapReady ? '高德真地图 · 演示路线' : '高德真地图')
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#FFFFFF')
-          .layoutWeight(1)
-        Button(this.castActive ? '停止投屏' : '投屏到车机')
-          .fontSize(12)
-          .onClick(() => this.onToggleCast())
+      // ★ `chrome=false` 时不渲染 —— 该栏会被一起采集进车机画面（见属性注释）。
+      if (this.chrome) {
+        Row({ space: 10 }) {
+          Button('返回设置')
+            .fontSize(12)
+            .onClick(() => this.onExit())
+          Text(this.mapReady ? '高德真地图 · 演示路线' : '高德真地图')
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+            .layoutWeight(1)
+          Button(this.castActive ? '停止投屏' : '投屏到车机')
+            .fontSize(12)
+            .onClick(() => this.onToggleCast())
+        }
+        .width('100%')
+        .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+        .backgroundColor('#CC0D1117')
+        .alignItems(VerticalAlign.Center)
+        .align(Alignment.Top)
       }
-      .width('100%')
-      .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-      .backgroundColor('#CC0D1117')
-      .alignItems(VerticalAlign.Center)
-      .align(Alignment.Top)
 
       // 顶层：加载提示（居中，避开状态栏/导航栏区域）
       if (!this.mapReady && this.errText.length === 0) {
