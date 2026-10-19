@@ -106,7 +106,35 @@ export class CarLifeStateMachine {
   /** 是否已发送过手机设备信息（避免重复发送） */
   private deviceInfoSent: boolean = false;
 
-  /** 车机下发的视频参数，默认 720p@30（参考实现默认值） */
+  /**
+   * 车机下发的视频参数。
+   *
+   * ★ 默认值取 **1920×720@30** —— 这不是"写死分辨率"，而是**兜底值**：
+   *   正常流程里车机会经 `98311 HU_VIDEO_ENCODER_INIT` 下发真实参数，
+   *   在 `onHuVideoEncoderInit()` 里覆盖本默认值（仅当下发值 > 0 时才覆盖）。
+   *   本默认值只在「车机未下发 / 下发 0」时生效。
+   *
+   * 为什么是 1920×720：
+   *   本机真机（MRT-AL10 / nova 14 Ultra）**车机模式下的实际显示尺寸就是 1920×720 横屏**
+   *   （2026-10-13 实测确认；此前记的 1272×2860 是竖屏原始/规格值，非实际显示尺寸）。
+   *   旧默认值 1280×720 与屏幕不匹配 —— 一方面丢了近 1/3 像素，另一方面
+   *   竖屏内容硬压进横屏会变形。实测对比：1920×720 下中位帧 12.5KB，
+   *   1280×720 仅 2.9KB（详见 memory 2026-10-13 第六节）。
+   *   ⚠️ 真机屏幕若换型号，此值需同步调整。
+   */
+  /**
+   * 我们推给车机的画面尺寸 —— **由我们自己定**，不迁就车机下发值。
+   *
+   * ★ 2026-10-13 路线 A 重置后的新含义：
+   *   在录屏方案里，这个字段曾是"采集手机屏幕的尺寸"，必须等于物理屏尺寸，
+   *   否则 VirtualDisplay 与编码器不匹配、一帧都编不出来（code=10）→ 车机崩溃。
+   *
+   *   路线 A 改自绘后，这个约束**彻底消失**：画面是我们自己渲染的，
+   *   想画多大就画多大。车机下发的 98311 只是它"期望"的值，**仅作参考**。
+   *
+   *   这里取车机下发值作为默认（车机最熟悉自己的显示能力），
+   *   把 16:9 的 1280×720 作为极端兜底。
+   */
   videoParams: VideoParams = { width: 1280, height: 720, frameRate: 30 };
 
   /** 手机端设备信息（可在外部设置以反映真实机型） */
@@ -333,17 +361,33 @@ export class CarLifeStateMachine {
     this.setState(HandshakeState.CONFIG_EXCHANGING);
   }
 
-  /** 4. 收到车机视频编码参数 -> 回复编码参数确认 */
+  /** 4. 收到车机视频编码参数 -> 回复我方编码参数 */
   private async onHuVideoEncoderInit(msg: Message): Promise<void> {
     const enc: CarlifeVideoEncoderInfo = CarlifeVideoEncoderInfo.decode(msg.payload);
-    if (enc.width > 0) { this.videoParams.width = enc.width; }
-    if (enc.height > 0) { this.videoParams.height = enc.height; }
-    if (enc.frameRate > 0) { this.videoParams.frameRate = enc.frameRate; }
-    this.listener.onLog(`[视频] 车机期望编码参数: ${this.videoParams.width}x${this.videoParams.height} @ ${this.videoParams.frameRate}fps`);
+    this.listener.onLog(`[视频] 车机期望编码参数: ${enc.width}x${enc.height} @ ${enc.frameRate}fps`);
+
+    // ★ 路线 A（自绘画布）：尺寸**由我们自己定**，不必迁就车机。
+    //
+    //   录屏方案时代这里必须取"手机真实屏幕尺寸"，否则 VirtualDisplay 与
+    //   编码器不匹配 → 一帧都编不出来（code=10）→ 车机硬解器崩溃。
+    //   改自绘后这个约束消失：画布是我们自己渲染的，尺寸随意。
+    //
+    //   当前策略：采纳车机下发的宽高（它最清楚自己的显示区），
+    //   车机没给合法值时用 1280×720 兜底。将来若自绘 UI 有更合适的
+    //   尺寸（如车机是宽屏 1920×720），改这里即可。
+    if (enc.width >= 128 && enc.height >= 128) {
+      this.videoParams.width = enc.width;
+      this.videoParams.height = enc.height;
+    }
+    if (enc.frameRate > 0) {
+      this.videoParams.frameRate = enc.frameRate;
+    }
+    this.listener.onLog(`[视频] 采用画面尺寸 ${this.videoParams.width}x${this.videoParams.height}`
+      + ` @ ${this.videoParams.frameRate}fps`);
 
     this.setState(HandshakeState.VIDEO_PREPARING);
 
-    // 回复手机侧的编码参数（与车机期望一致）
+    // 回复手机侧的编码参数（以实际要用的尺寸回复，让车机知道真实分辨率）
     const reply = new CarlifeVideoEncoderInfo(
       this.videoParams.width, this.videoParams.height, this.videoParams.frameRate);
     await this.send(C.MSG_CMD_VIDEO_ENCODER_INIT, reply.encode());
@@ -501,7 +545,14 @@ export class CarLifeStateMachine {
     d.release = '12';
     d.sdk = '12';
     d.sdkInt = 12;
+    // ★ 字段号以官方 CarlifeDeviceInfoProto.proto 为准：carlifeversion = **24**，
+    //   而 22 是 `token`（此前错把版本号发在 22，等于给车机塞了个假 token）。
+    //   车机端 APK 内同样存在 carlifeversion_ / carlifeSdkInt_ / year_ 字段，
+    //   官方手机端也有 "carlifeversion=" 日志串 → 说明官方确实会填这一项。
+    //   值沿用本端版本号；官方具体填什么版本未取到（本机无可用反编译器），
+    //   但该字段 optional，且此前它根本没到达车机，故改动不构成回归。
     d.carlifeversion = '1.0.0';
+    d.token = '';
     d.fingerprint = 'HUAWEI/harmony/harmony:12/HarmonyOS/1:user/release-keys';
     return d;
   }

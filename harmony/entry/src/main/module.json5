@@ -21,12 +21,32 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        // ★ 屏幕方向：竖屏（2026-10-15 改）。
+        //   为什么不再是 auto_rotation_landscape：自 2026-10-15 起手机端**只显示设置面板**，
+        //   车机画面改由 native HmiRenderer 自绘、**与手机屏幕方向无关**（两条独立通路，
+        //   见 MEMORY §1.3）。设置面板是竖排列表，竖屏才是它的正确形态。
+        //   ⚠️ 车机推流分辨率由车机经 65544 下发（实测 1280x720），不取自本字段。
+        "orientation": "portrait",
+        // ★★ 支持系统「智慧多窗」的悬浮小窗（2026-10-18）。
+        //   不声明时系统默认只允许 fullscreen —— 用户**根本拖不出小窗**，
+        //   这是"走系统窗口管理"这条路径能成立的前提。
+        //   拖成小窗后由 pages/Index.ets 的 windowStatusChange 自动接管：
+        //   切 16:9 横屏 + 把采集区域锁到该小窗。
+        "supportWindowMode": [
+          "fullscreen",
+          "split",
+          "floating"
+        ],
+        // 多窗口（分屏/悬浮）下优先横屏 —— 车机画布是 1280×720，
+        // 小窗横屏后区域宽高比才能和它对齐，避免拉伸。
+        "preferMultiWindowOrientation": "landscape",
         // 长时任务类型：决定切后台/熄屏后不被系统回收
         // AUDIO_RECORDING：官方用途含「后台录制与屏幕采集」，是本方案保活的关键
-        // LOCATION：辅助提升保活优先级（CarLife 官方 Android 版亦使用 location 类型）
+        // ★ 2026-10-16 移除 "location"：长时任务的规则是「申请的类型**必须有对应业务在跑**」，
+        //   否则会被系统**挂起**（SYSTEM_SUSPEND_LOCATION_NOT_USED = 8），而挂起后切后台
+        //   必定冻结 —— 比不申请更糟。本应用无定位业务（全仓 grep 定位 API 零命中）。
         "backgroundModes": [
-          "audioRecording",
-          "location"
+          "audioRecording"
         ],
         "skills": [
           {
@@ -36,6 +56,34 @@
             "actions": [
               "action.system.home"
             ]
+          },
+          // ★ Car Kit 导航信息服务声明（skills `action.navigation.infoservice` +
+          //   metadata `carHopCapability`）已于 2026-10-16 **整体移除**。
+          //
+          //   原因：该路线已判死，见 `core/NaviInfoProbe.ets` 文件头的历史记录 ——
+          //     · SDK 层：`NavigationController` 只有 2×update（写）+ register/unregister，
+          //       **没有任何读取接口**；`getNavigationController()` 取的是控制器实例、不是数据。
+          //     · 真机实测：release 包下注册成功但 25 秒零回调。
+          //     · 官方客服：`onQueryNavigationInfo` 是"系统查询、应用应答"的被动模式，
+          //       不是主动拉取；根因是**应用沙箱**（第三方读不到其他应用的运行时数据）。
+          //   留着这套声明只会让系统把我们当成"导航信息服务的参与方"、引发无关回调。
+        ]
+      }
+    ],
+    // ★ 无障碍扩展：触控注入探针。
+    //   `type` 必须严格为 "accessibility"，否则系统不认。
+    //   用户在「设置 → 无障碍 → 已安装的服务」里手动开启后才会 onConnect。
+    "extensionAbilities": [
+      {
+        "name": "CarHiAccessibilityExtAbility",
+        "srcEntry": "./ets/accessibility/CarHiAccessibilityExtAbility.ets",
+        "label": "$string:accessibility_label",
+        "description": "$string:accessibility_desc",
+        "type": "accessibility",
+        "metadata": [
+          {
+            "name": "ohos.accessibleability",
+            "resource": "$profile:accessibility_config"
           }
         ]
       }
@@ -58,6 +106,76 @@
           "abilities": [
             "EntryAbility"
           ],
+          "when": "always"
+        }
+      },
+      // ★ Car Kit 权限（2026-10-18 **重新加回**，系统授权 normal/system_grant，
+      //   开放权限列表内，声明即授予，无需审批）：
+      //   - ACCESS_SERVICE_NAVIGATION_INFO：把**方式2 自有引擎**的导航数据
+      //     作为 provider 写入系统（updateNavigationStatus 等），供驾驶模式/系统导航卡消费。
+      //     2026-10-16 移除时是"无数据源干等系统回调"的读取思路；现在方向反转为写入方。
+      //   - ACCESS_CAR_DISTRIBUTED_ENGINE：获取手机与车机的连接状态、displayId ——
+      //     可用于「车机一连上自动开始投屏」。
+      //   （这两个权限本身是 normal 级、声明即可用。）
+      {
+        "name": "ohos.permission.ACCESS_SERVICE_NAVIGATION_INFO"
+      },
+      {
+        "name": "ohos.permission.ACCESS_CAR_DISTRIBUTED_ENGINE"
+      },
+      // ★ 高德导航 SDK（@amap/amap_lbs_navi）所需权限
+      //
+      //   依据：SDK 类型定义里的错误码注明「需要声明定位权限并在系统设置中授予」
+      //   （`amap_lbs_location` 的 LocationError: "Declare the required location
+      //   permissions and grant them to the application in system settings."），
+      //   以及高德鸿蒙定位/导航 SDK 的标准权限集。
+      //   导航必备：定位（精确/模糊）+ 网络；辅助：Wi-Fi/手机状态（基站辅助定位）。
+      {
+        "name": "ohos.permission.LOCATION",
+        "reason": "$string:reason_location",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.APPROXIMATELY_LOCATION",
+        "reason": "$string:reason_location",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      // ⚠️ 悬浮窗权限（FLOAT_VIEW / SYSTEM_FLOAT_WINDOW / USE_FLOAT_BALL）
+      //    **全部不可用，已移除**（2026-10-15 真机实测）：
+      //      `ohos.permission.FLOAT_VIEW` 声明后 → 装机直接失败
+      //        `code:9568289 install failed due to grant request permissions failed.
+      //         PermissionName: ohos.permission.FLOAT_VIEW`
+      //    虽然它的 `grantMode = user_grant`（用户授权），但
+      //    `availableLevel = system_basic` —— **普通应用无法使用**。
+      //    （与 CONTROL_DEVICE 同一档待遇：声明即装机失败。）
+      //    ⇒ 鸿蒙的全局悬浮窗对第三方应用是关闭的。悬浮球方案作废。
+      // ★ 2026-10-16 新增：屏幕采集的麦克风音频（`user_grant`，装机后弹框授权）。
+      //
+      //   为什么需要：长时任务 `AUDIO_RECORDING` 的系统判据是「**音频录制正在进行**」。
+      //   真机日志抓到系统挂起的原文：
+      //     `★[保活] 长时任务挂起 id=395 suspendState=true reason=-1
+      //        msg=No recording stream detected when applying for audio recording mode`
+      //   —— 我们把 `micCapInfo` 置 0 且 `SetMicrophoneEnabled(false)` 之后，
+      //   系统检测不到任何「录音流」，判定名实不符 → **挂起长时任务**
+      //   → 切后台即冻结 → 采集与心跳(65563)全停 → 车机 5 秒超时断开。
+      //
+      //   ⚠️ 关键实测结论：**只采「内录」不算录音流**。
+      //     内录（`innerCapInfo` / `OH_ALL_PLAYBACK`）的数据我们确实在回调里收得到
+      //     （日志 `★ inner audio buffer #3000`），但系统仍然报
+      //     `No recording stream detected` —— 它的判据是**麦克风录音会话**。
+      //   ⇒ 必须真的开麦克风采集，这个权限是前提。
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:reason_microphone",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          // 投屏是后台长时任务，麦克风也要在后台保持 —— 故用 always
           "when": "always"
         }
       }

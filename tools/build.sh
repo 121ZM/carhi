@@ -25,6 +25,8 @@ if [ -z "${CLT_HOME:-}" ]; then
       "D:/dev/Huawei/DevEco Studio" \
       "/d/dev/DevEco Studio" \
       "D:/dev/DevEco Studio" \
+      "/e/Program Files/Huawei/DevEco Studio" \
+      "E:/Program Files/Huawei/DevEco Studio" \
       "E:/AITools/command-line-tools" ; do
     if [ -f "$candidate/tools/hvigor/bin/hvigorw.js" ] || [ -f "$candidate/hvigor/bin/hvigorw.js" ]; then
       CLT_HOME="$candidate"
@@ -33,6 +35,9 @@ if [ -z "${CLT_HOME:-}" ]; then
   done
 fi
 CLT_HOME="${CLT_HOME:-E:/AITools/command-line-tools}"
+# ★ 脚本自身所在目录（**绝对路径**，必须在任何 cd 之前算出来）。
+#   第 109 行会 `cd "$PROJECT_DIR"` 切到 harmony/，之后再用相对路径找 tools/ 下的脚本就会失败。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../harmony" && pwd)"
 
 # JDK：未显式指定时，依次尝试 DevEco 自带 jbr 与本机常见 JDK 位置
@@ -126,9 +131,33 @@ echo
 echo "==> 产物:"
 find "$PROJECT_DIR/entry/build" -name "*.hap" -print 2>/dev/null || echo "（未找到 hap）"
 
-# ---------------- 可选：签名 ----------------
+# ---------------- 可选：追加签名 ----------------
+#
+# ★ 先厘清现状，避免误导（2026-10-13 修正）：
+#   本工程的**实际签名由 hvigor 自己完成** —— `build-profile.json5` 的
+#   `signingConfigs[0]` 指向 DevEco 自动签名材料（`C:\Users\dev\.ohos\config\default_harmony_*.{cer,p7b}`），
+#   且 `products[0]` 里写了 `"signingConfig": "default"`，所以每次构建都会产出
+#   `entry-default-signed.hap`（见上面的 `SignHap` 任务）。
+#
+#   而 `tools/sign.sh` 是**自管证书**那条路（自己 genkey → AGC 换 .cer/.p7b），
+#   目前 `certs/` 里只有 csr/p12、**没有 .cer/.p7b**，那条路从未走通。
+#   所以这里**只在自管材料齐备时**才追加签名；否则明确说明「已由 hvigor 签好」，
+#   而不是抛一个 `tools/sign.sh: No such file or directory` 之类的迷惑性错误。
 if [ "$DO_SIGN" = "1" ]; then
   echo
-  echo "==> 追加签名（模式 $MODE）"
-  bash "$(dirname "${BASH_SOURCE[0]}")/sign.sh" sign "$MODE"
+  case "$MODE" in
+    release|正式) _cer="$SCRIPT_DIR/../certs/carhi-release.cer"
+                  _p7b="$SCRIPT_DIR/../certs/carhi-release.p7b" ;;
+    *)            _cer="$SCRIPT_DIR/../certs/carhi-debug.cer"
+                  _p7b="$SCRIPT_DIR/../certs/carhi-debug.p7b" ;;
+  esac
+  if [ -f "$_cer" ] && [ -f "$_p7b" ]; then
+    echo "==> 追加签名（自管证书，模式 $MODE）"
+    bash "$SCRIPT_DIR/sign.sh" sign "$MODE"
+  else
+    echo "==> 签名：已由 hvigor 用 DevEco 自动签名材料完成"
+    echo "    产物: $PROJECT_DIR/entry/build/default/outputs/default/entry-default-signed.hap"
+    echo "    （未跑 tools/sign.sh —— 它走的是自管证书那条路，"
+    echo "      需要 certs/carhi-${MODE}.cer + .p7b，当前不存在）"
+  fi
 fi

@@ -30,15 +30,12 @@
 #include <multimedia/player_framework/native_avformat.h>
 #include <multimedia/player_framework/native_avcodec_base.h>
 
-namespace carhi {
+// ★ 复用 canvas_encoder.h 里的公共类型（EncodedFrame / EncoderParams）。
+//   两者字段完全一致，各定义一份会在同时 include 时报 `redefinition`
+//   （2026-10-15 恢复录屏代码时踩到）。合并成一个定义是唯一合理做法。
+#include "canvas_encoder.h"
 
-/** 一帧编码产物（H.264 Annex-B 裸流，无容器封装） */
-struct EncodedFrame {
-    const uint8_t *data;
-    int32_t size;
-    int64_t pts;        // 微秒
-    bool keyFrame;
-};
+namespace carhi {
 
 /**
  * 采集中断的错误码约定（负值，与系统 errno 区分开）
@@ -60,15 +57,6 @@ enum CaptureInterrupt {
     INTERRUPT_CAPTURE_ERROR = -5,
 };
 
-/** 编码参数 */
-struct EncoderParams {
-    int32_t width = 1280;
-    int32_t height = 720;
-    int32_t frameRate = 30;
-    int32_t bitrate = 4000000;   // bit/s
-    int32_t iFrameIntervalMs = 2000;
-};
-
 /**
  * 采集 + 编码管线。
  * 生命周期：Start() -> ... -> Stop()，Stop 可重复调用。
@@ -80,6 +68,9 @@ public:
     using FrameCallback = std::function<void(const EncodedFrame &frame)>;
     using ErrorCallback = std::function<void(int32_t code, const std::string &msg)>;
     using LogCallback = std::function<void(const std::string &msg)>;
+    /** 原始内录 PCM 回调（只在采集回调有效期内访问 data；上层须立即复制） */
+    using AudioCallback = std::function<void(const uint8_t *data, size_t size,
+                                             int64_t timestampUs, int32_t sourceType)>;
 
     ScreenEncoder() = default;
     ~ScreenEncoder();
@@ -92,7 +83,7 @@ public:
      * @return 0 成功；非 0 为失败阶段编码（见实现内注释）
      */
     int32_t Start(const EncoderParams &params, FrameCallback onFrame,
-                  ErrorCallback onError, LogCallback onLog);
+                  ErrorCallback onError, LogCallback onLog, AudioCallback onAudioFrame = nullptr);
 
     /** 停止并释放全部资源（幂等） */
     void Stop();
@@ -109,6 +100,47 @@ public:
      * @return 0 成功；非 0 失败
      */
     int32_t SetFrameRate(int32_t frameRate);
+
+    /**
+     * 记录物理屏信息（**自然方向**宽高 + 当前旋转）。
+     *
+     * 为什么需要：ArkTS 的 `windowRect` 是**当前旋转方向**下的坐标
+     * （横屏时原点在横屏左上角、宽高按横屏算），而
+     * `OH_AVScreenCapture_SetCaptureArea` 要的是**屏幕自然方向**坐标。
+     * 不做换算时，横屏窗口矩形会超出自然屏宽度 → 系统返回
+     * `AV_SCREEN_CAPTURE_ERR_INVALID_VAL`(3)，区域设置直接失败（2026-10-18 实测）。
+     *
+     * @param displayId    主屏 id（`display.getDefaultDisplaySync().id`）
+     * @param naturalWidth 自然方向宽（竖屏时为短边）
+     * @param naturalHeight 自然方向高
+     * @param rotation     当前旋转：0/90/180/270
+     */
+    void SetScreenMeta(uint64_t displayId, int32_t naturalWidth, int32_t naturalHeight, int32_t rotation);
+
+    /**
+     * ★ 设置采集区域（只投屏幕上一块矩形）—— 「小窗口投屏」的核心。
+     *
+     * 背景：应用**不能**自建全局悬浮窗（`FLOAT_VIEW` 等权限要求系统应用，
+     * 声明后装机直接失败 9568298/9568289）。可行路径是让用户用系统「智慧多窗」
+     * 把本应用拖成悬浮小窗，然后把该小窗的屏幕矩形交给采集器 —— 车机就只看到
+     * 这块内容，手机其余部分照常使用。
+     *
+     * 官方语义（`native_avscreen_capture.h`，@since 20）：
+     *   - 采集**启动前或启动后**均可调用，可运行中动态改（拖窗口实时跟随）；
+     *   - 坐标与尺寸必须非负，且区域不得跨屏；
+     *   - 设置失败时沿用上一次的区域。
+     *
+     * @param x,y     区域左上角（**屏幕坐标，px**，与 ArkTS `windowRect` 同口径）
+     * @param width,height 区域尺寸（px，必须 > 0）
+     * @return 0 成功；-1 参数非法；-2 采集未就绪；-3 系统拒绝（负的 ErrCode 会记日志）
+     */
+    int32_t SetCaptureArea(int32_t x, int32_t y, int32_t width, int32_t height);
+
+    /**
+     * 清除区域限制，恢复整屏采集。
+     * @return 0 成功；非 0 失败
+     */
+    int32_t ClearCaptureArea();
 
     /**
      * 仅重启屏幕采集（编码器保持存活）。
@@ -140,6 +172,22 @@ private:
     // ---- 采集回调（静态，转实例方法） ----
     static void OnCaptureState(OH_AVScreenCapture *capture, OH_AVScreenCaptureStateCode stateCode, void *userData);
     static void OnCaptureError(OH_AVScreenCapture *capture, int32_t errorCode, void *userData);
+    /**
+     * ★ 采集数据回调（音频/视频 buffer 可用时触发）。
+     *
+     * 为什么要注册它：长时任务 `AUDIO_RECORDING` 的语义是"音频录制正在进行"。
+     * 若只配置参数、无人消费数据，系统可能判定"音频录制未进行"而**挂起任务**
+     * （SYSTEM_SUSPEND_AUDIO_RECORDING_NOT_RUNNING = 7）→ 任务挂起后应用一切到后台
+     * 就被冻结 → 采集与心跳全停 → 车机 5 秒超时断开（「投屏切应用掉线」）。
+     * 这里把内录音频真正消费掉，让任务名实相符。
+     *
+     * ⚠ 官方语义：注册本回调后，OH_AVScreenCapture_AcquireAudioBuffer /
+     * ReleaseAudioBuffer / AcquireVideoBuffer / ReleaseVideoBuffer 都会**返回失败**；
+     * buffer 由系统在回调返回后自动失效，**不需要也不允许手动释放**。
+     */
+    static void OnCaptureBufferAvailable(OH_AVScreenCapture *capture, OH_AVBuffer *buffer,
+                                         OH_AVScreenCaptureBufferType bufferType,
+                                         int64_t timestamp, void *userData);
 
     void HandleNewOutputBuffer(uint32_t index, OH_AVBuffer *buffer);
     void EmitError(int32_t code, const std::string &msg);
@@ -170,10 +218,18 @@ private:
     std::atomic<int32_t> encodedHeight_{0};
     std::atomic<bool> forceKeyFrame_{false};
 
+    /** ★ 内录音频 buffer 计数 —— 证明"音频录制确实在进行"（长时任务保活的关键） */
+    std::atomic<uint64_t> audioInnerBuffers_{0};
+    /** 麦克风音频 buffer 计数（已关麦克风，正常应恒为 0） */
+    std::atomic<uint64_t> audioMicBuffers_{0};
+    /** 采集侧视频 buffer 计数（surface 模式下应恒为 0） */
+    std::atomic<uint64_t> videoBuffers_{0};
+
     EncoderParams params_{};
     FrameCallback onFrame_;
     ErrorCallback onError_;
     LogCallback onLog_;
+    AudioCallback onAudioFrame_;
 
     OH_AVCodec *codec_ = nullptr;
     OH_AVScreenCapture *capture_ = nullptr;
@@ -185,6 +241,24 @@ private:
      * 编码器 Surface 每次重建都会让车机侧丢一段流，所以重启必须低频。
      */
     int64_t lastRestartMs_ = 0;
+
+    /**
+     * 当前生效的采集区域（-1 表示未设置 = 整屏）。
+     *
+     * 为什么要记下来：`RestartCapture()` 会销毁并重建 `OH_AVScreenCapture`
+     * 实例，区域设置随实例一起丢失。恢复后必须重新下发，否则「小窗投屏」
+     * 会在一次采集重启后悄悄变回整屏 —— 这种退化在日志里极难发现。
+     */
+    int32_t areaX_ = -1;
+    int32_t areaY_ = -1;
+    int32_t areaW_ = -1;
+    int32_t areaH_ = -1;
+
+    /** 物理屏信息（用于把 windowRect 从「当前旋转」换算到「自然方向」） */
+    uint64_t displayId_ = 0;
+    int32_t dispW_ = 0;
+    int32_t dispH_ = 0;
+    int32_t dispRotation_ = 0;
 
     std::mutex lock_;
 };

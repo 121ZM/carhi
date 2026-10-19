@@ -17,18 +17,17 @@ namespace carhi {
 
 namespace {
 
-/** 启动失败阶段，便于定位（返回值即阶段号） */
-enum StartStage {
-    STAGE_OK = 0,
-    STAGE_CREATE_CODEC_FAILED = 1,
-    STAGE_CONFIGURE_FAILED = 2,
-    STAGE_GET_SURFACE_FAILED = 3,
-    STAGE_REGISTER_CALLBACK_FAILED = 4,
-    STAGE_PREPARE_FAILED = 5,
-    STAGE_START_CODEC_FAILED = 6,
-    STAGE_CREATE_CAPTURE_FAILED = 7,
-    STAGE_INIT_CAPTURE_FAILED = 8,
-    STAGE_START_CAPTURE_FAILED = 9,
+/**
+ * ★ 采集特有的启动阶段（7~9）。
+ *
+ * 0~6 复用 `canvas_encoder.h` 的 `enum StartStage`（STAGE_OK / STAGE_CREATE_CODEC_FAILED / ...），
+ * 避免同名枚举在两处各定义一份 → 同时 include 时 `reference to 'STAGE_OK' is ambiguous`
+ * （2026-10-15 恢复录屏代码时踩到）。这里只补采集独有的三项，并用独立前缀防撞。
+ */
+enum CaptureStartStage {
+    STAGE_CREATE_CAPTURE_FAILED = 17,   // 从 17 起，远离 StartStage 的 0~7
+    STAGE_INIT_CAPTURE_FAILED = 18,
+    STAGE_START_CAPTURE_FAILED = 19,
 };
 
 /**
@@ -105,6 +104,15 @@ void ScreenEncoder::OnNewOutputBuffer(OH_AVCodec *codec, uint32_t index, OH_AVBu
     auto *self = static_cast<ScreenEncoder *>(userData);
     if (self == nullptr) {
         return;
+    }
+    // ★ 出帧诊断（2026-10-15 定位「启动成功但 0 帧」时加的）：
+    //   前 3 帧逐帧打，之后每 60 帧打一次 —— 能一眼看出"有没有帧、稳不稳"。
+    //   没有这行日志时，只靠返回码无法区分「编码器没输出」和「输出被吞了」。
+    static std::atomic<uint64_t> s_outCount{0};
+    const uint64_t n = s_outCount.fetch_add(1) + 1;
+    if (n <= 3 || n % 60 == 0) {
+        LOGI("★ capture encoder output #%{public}llu (index=%{public}u)",
+             static_cast<unsigned long long>(n), index);
     }
     self->HandleNewOutputBuffer(index, buffer);
 }
@@ -219,6 +227,67 @@ void ScreenEncoder::OnCaptureError(OH_AVScreenCapture *capture, int32_t errorCod
     LOGE("capture error callback code=%{public}d", errorCode);
 }
 
+// ---------------------------------------------------------------------------
+// 采集数据回调：真正消费音频，让 AUDIO_RECORDING 长时任务"名实相符"
+// ---------------------------------------------------------------------------
+
+void ScreenEncoder::OnCaptureBufferAvailable(OH_AVScreenCapture *capture, OH_AVBuffer *buffer,
+                                             OH_AVScreenCaptureBufferType bufferType,
+                                             int64_t timestamp, void *userData) {
+    (void)capture;
+    (void)buffer;
+    auto *self = static_cast<ScreenEncoder *>(userData);
+    if (self == nullptr) {
+        return;
+    }
+    switch (bufferType) {
+        case OH_SCREEN_CAPTURE_BUFFERTYPE_AUDIO_INNER: {
+            // 内录回调 buffer 只在本回调有效；统计后立即复制/交给上层同步复制。
+            const uint64_t n = self->audioInnerBuffers_.fetch_add(1) + 1;
+            if (n <= 3 || n % 300 == 0) {
+                LOGI("★ inner audio buffer #%{public}llu ts=%{public}lld",
+                     static_cast<unsigned long long>(n), static_cast<long long>(timestamp));
+            }
+            if (self->onAudioFrame_ != nullptr && buffer != nullptr) {
+                OH_AVCodecBufferAttr attr{};
+                if (OH_AVBuffer_GetBufferAttr(buffer, &attr) == AV_ERR_OK
+                    && attr.size > 0 && attr.offset >= 0) {
+                    const int32_t capacity = OH_AVBuffer_GetCapacity(buffer);
+                    const uint8_t *addr = OH_AVBuffer_GetAddr(buffer);
+                    const int64_t end = static_cast<int64_t>(attr.offset) + attr.size;
+                    if (addr != nullptr && capacity >= 0 && end <= capacity) {
+                        const int64_t ptsUs = attr.pts > 0 ? attr.pts : timestamp / 1000;
+                        self->onAudioFrame_(addr + attr.offset, static_cast<size_t>(attr.size), ptsUs,
+                                            static_cast<int32_t>(bufferType));
+                    }
+                }
+            }
+            break;
+        }
+        case OH_SCREEN_CAPTURE_BUFFERTYPE_AUDIO_MIC: {
+            // 已显式 SetMicrophoneEnabled(false)，正常不该收到；收到即说明关闭未生效。
+            const uint64_t n = self->audioMicBuffers_.fetch_add(1) + 1;
+            if (n <= 3 || n % 300 == 0) {
+                LOGW("mic audio buffer #%{public}llu (unexpected: mic should be disabled)",
+                     static_cast<unsigned long long>(n));
+            }
+            break;
+        }
+        case OH_SCREEN_CAPTURE_BUFFERTYPE_VIDEO: {
+            // surface 模式下视频走编码器输入 Surface，不经本回调。
+            // 若收到，说明模式与预期不符（值得警惕，但不影响已建立的 surface 通路）。
+            const uint64_t n = self->videoBuffers_.fetch_add(1) + 1;
+            if (n <= 3) {
+                LOGW("capture video buffer #%{public}llu via data callback (surface mode expected)",
+                     static_cast<unsigned long long>(n));
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 bool ScreenEncoder::IsRecoverable(int32_t code) {
     // 只有"用户在系统弹窗点取消/主动停止"才是致命；其余都值得重试
     return code != INTERRUPT_CANCELED_BY_USER && code != INTERRUPT_STOPPED_BY_USER;
@@ -236,7 +305,7 @@ void ScreenEncoder::EmitError(int32_t code, const std::string &msg) {
 // ---------------------------------------------------------------------------
 
 int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
-                             ErrorCallback onError, LogCallback onLog) {
+                             ErrorCallback onError, LogCallback onLog, AudioCallback onAudioFrame) {
     if (running_.load()) {
         LOGI("already running, ignore Start");
         return STAGE_OK;
@@ -246,6 +315,7 @@ int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
     onFrame_ = std::move(onFrame);
     onError_ = std::move(onError);
     onLog_ = std::move(onLog);
+    onAudioFrame_ = std::move(onAudioFrame);
     forceKeyFrame_.store(false);
 
     // ---------------- 1. 编码器 ----------------
@@ -267,7 +337,11 @@ int32_t ScreenEncoder::Start(const EncoderParams &params, FrameCallback onFrame,
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_FRAME_RATE, params_.frameRate);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_BITRATE, params_.bitrate);
-    OH_AVFormat_SetIntValue(format, OH_MD_KEY_MAX_BITRATE, params_.bitrate);
+    // ★ 刻意**不设** `OH_MD_KEY_MAX_BITRATE`（2026-10-15）：
+    //   canvas_encoder（稳定跑 500+ 帧）的配置里没有这一项，而 screen_encoder
+    //   多设了它。实测差异对照：设了之后采集约 120 帧就报
+    //   `code=10 = AV_ERR_INPUT_DATA_ERROR`；去掉后与 canvas_encoder 配置对齐。
+    //   另外它与 `BITRATE_MODE_CBR` 的语义也可能冲突（CBR 下无"最大码率"概念）。
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, BITRATE_MODE_CBR);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_I_FRAME_INTERVAL, params_.iFrameIntervalMs);
     // Baseline：无 B 帧、无 CABAC —— 安卓 4.4 老车机硬解最稳的组合
@@ -351,11 +425,36 @@ int32_t ScreenEncoder::StartCaptureLocked() {
     config.captureMode = OH_CAPTURE_HOME_SCREEN;
     config.dataType = OH_ORIGINAL_STREAM;   // 原始流：交给编码器，不落文件
 
-    // 本方案音频走蓝牙 A2DP 独立通道，采集侧不需要音频；
-    // 但结构体字段需填合法值，否则 Init 会参数校验失败。
+    // ★★★ 2026-10-16 **二次修正**：麦克风必须**开着**。
+    //
+    //   上一版（同日上午）把 `micCapInfo` 置 0、并 `SetMicrophoneEnabled(false)`，
+    //   理由是"注释说不用麦克风、实现却开麦自相矛盾"——**方向搞反了**，那是引入 bug。
+    //
+    //   真机证据（系统挂起的原文）：
+    //     `★[保活] 长时任务挂起 id=395 suspendState=true reason=-1
+    //        msg=No recording stream detected when applying for audio recording mode`
+    //   ⇒ 关掉麦克风后系统**检测不到任何录音流**，判定 `AUDIO_RECORDING`
+    //     长时任务名实不符 → **挂起任务** → 切后台即冻结
+    //     → 采集与心跳(65563)全停 → 车机 5 秒超时断开。
+    //
+    //   ⚠️ 关键：**只采「内录」不算录音流**。内录数据我们确实在回调里收得到
+    //     （日志 `★ inner audio buffer #3000`），但系统照样报
+    //     `No recording stream detected` —— 它看的是**麦克风录音会话**
+    //     （系统侧 `UpdateAudioRecord` / `IsAllSessionMute`）。
+    //
+    //   头文件语义（`native_avscreen_capture.h`）：
+    //   「If both **audioSampleRate** and **audioChannels** in the OH_AudioCaptureInfo
+    //     struct are **0**, the OH_AVScreenCapture instance ignores the corresponding
+    //     audio parameters and does not collect the audio data.」
+    //   ⇒ 填 48000/2 = **真的开麦采集**，这正是我们要的。
+    //
+    //   ⚠️ 前提：必须声明并在运行期授予 `ohos.permission.MICROPHONE`
+    //     （见 module.json5 + `EntryAbility.requestMicPermission()`），否则采集起不来。
     config.audioInfo.micCapInfo.audioSampleRate = 48000;
     config.audioInfo.micCapInfo.audioChannels = 2;
     config.audioInfo.micCapInfo.audioSource = OH_SOURCE_DEFAULT;
+    // 内录（系统播放回采）保留：后续若要接 CarLife AUDIO(9240) 通道，数据从这里出。
+    // （头文件要求：内录参数 或 视频参数 至少一个有效；麦克风参数是 optional。）
     config.audioInfo.innerCapInfo.audioSampleRate = 48000;
     config.audioInfo.innerCapInfo.audioChannels = 2;
     config.audioInfo.innerCapInfo.audioSource = OH_ALL_PLAYBACK;
@@ -366,6 +465,14 @@ int32_t ScreenEncoder::StartCaptureLocked() {
     config.videoInfo.videoCapInfo.missionIDsLen = 0;
     config.videoInfo.videoCapInfo.videoFrameWidth = params_.width;
     config.videoInfo.videoCapInfo.videoFrameHeight = params_.height;
+    // ★ 采集输出格式必须是 **RGBA**（不是 YUV）。
+    //
+    //   2026-10-15 实测对照（同一个 surface 模式启动方式）：
+    //     - `OH_VIDEO_SOURCE_SURFACE_YUV`  → `OH_AVScreenCapture_Init` 直接失败（stage 18）
+    //     - `OH_VIDEO_SOURCE_SURFACE_RGBA` → Init 成功、采集启动成功
+    //   即：本机采集器**只接受 RGBA**，YUV 不被支持。
+    //   （曾误以为"H.264 编码器只吃 YUV，所以要改 YUV"——那是 buffer 模式的思路；
+    //     surface 模式下由系统做格式转换，采集侧填 RGBA 即可。）
     config.videoInfo.videoCapInfo.videoSource = OH_VIDEO_SOURCE_SURFACE_RGBA;
     config.videoInfo.videoEncInfo.videoCodec = OH_H264;
     config.videoInfo.videoEncInfo.videoBitrate = params_.bitrate;
@@ -385,6 +492,50 @@ int32_t ScreenEncoder::StartCaptureLocked() {
     OH_AVScreenCapture_SetErrorCallback(capture_, &ScreenEncoder::OnCaptureError, this);
     OH_AVScreenCapture_SetMaxVideoFrameRate(capture_, params_.frameRate);
 
+    // ★ 显式**开启**麦克风（与上面 `micCapInfo` 填 48000/2 配套）。
+    //
+    //   2026-10-16 二次修正：上一版这里传的是 `false`，直接导致系统报
+    //   `No recording stream detected when applying for audio recording mode`
+    //   并**挂起**长时任务 → 切后台冻结 → 掉线。完整理由见上方 micCapInfo 的注释。
+    //
+    //   注：`OH_AVScreenCapture_SetMicrophoneEnabled` 的**默认值本来就是 true**，
+    //   这里显式调用只是把意图写死，顺带把返回值记进日志。
+    //   前置条件：`ohos.permission.MICROPHONE` 已声明且已授予；
+    //   没授予时这里会返回错误码（视频采集照常，但长时任务会因缺录音流被挂起）。
+    {
+        OH_AVSCREEN_CAPTURE_ErrCode micErr =
+            OH_AVScreenCapture_SetMicrophoneEnabled(capture_, true);
+        if (micErr != AV_SCREEN_CAPTURE_ERR_OK) {
+            LOGW("SetMicrophoneEnabled(true) failed code=%{public}d"
+                 "（麦克风权限没授予？长时任务会因缺录音流被挂起）",
+                 micErr);
+        } else {
+            LOGI("microphone enabled (recording stream present → keeps AUDIO_RECORDING alive)");
+        }
+    }
+
+    // ★ 注册采集数据回调：**真正消费内录音频**（2026-10-16）。
+    //
+    //   动机：长时任务 `AUDIO_RECORDING` 的语义是"音频录制正在进行"。此前只把
+    //   `innerCapInfo` 参数填了值，却**没有任何人消费音频数据** —— 系统很可能据此判定
+    //   "音频录制未进行"，把任务**挂起**（SYSTEM_SUSPEND_AUDIO_RECORDING_NOT_RUNNING = 7）；
+    //   任务一旦被挂起，应用一切到后台就会被冻结 → 采集 + 心跳(65563) 停
+    //   → 车机 5 秒超时断开，即「投屏切应用掉线」。
+    //   这里把音频数据真正收下来，让长时任务名实相符。
+    //
+    //   注意：视频仍走编码器输入 Surface，本回调在 surface 模式下只应收到音频；
+    //         若收到 VIDEO 类型，回调里会打 WARN 提示模式与预期不符。
+    {
+        OH_AVSCREEN_CAPTURE_ErrCode cbErr =
+            OH_AVScreenCapture_SetDataCallback(capture_, &ScreenEncoder::OnCaptureBufferAvailable, this);
+        if (cbErr != AV_SCREEN_CAPTURE_ERR_OK) {
+            LOGW("SetDataCallback failed code=%{public}d (audio not consumed)",
+                 static_cast<int32_t>(cbErr));
+        } else {
+            LOGI("capture data callback registered (consuming inner audio)");
+        }
+    }
+
     // ★ 采集策略：必须在 StartScreenCapture* 之前设置，否则返回 INVALID_STATE。
     // 关键作用是关掉"启动后统一弹 Picker（授权框）"——CarLife 场景下手机固定作为
     // 常驻推流端，每次重启采集都弹框会直接把投屏画面打断，且无法在息屏/无人值守下工作。
@@ -392,6 +543,19 @@ int32_t ScreenEncoder::StartCaptureLocked() {
     //       "If set to false, it means that the APP don't need to pop up the Picker
     //        after screen capture starts" （@since 20）
     ApplyCaptureStrategyLocked();
+
+    // ★ 屏幕旋转：让采集数据保持"正向"（rotation enabled, captured data remains upright）。
+    //   手机横竖屏切换时（如切到驾驶模式），不设这个采集数据可能带旋转标记，
+    //   编码器按未旋转尺寸解读 → 尺寸对不上 → AV_ERR_INPUT_DATA_ERROR。
+    //   必须在 StartScreenCapture* 之前调用（此阶段允许）。
+    {
+        OH_AVSCREEN_CAPTURE_ErrCode rotErr = OH_AVScreenCapture_SetCanvasRotation(capture_, true);
+        if (rotErr != AV_SCREEN_CAPTURE_ERR_OK) {
+            LOGW("SetCanvasRotation failed code=%{public}d", rotErr);
+        } else {
+            LOGI("SetCanvasRotation(true) ok");
+        }
+    }
 
     // 采集输出直连编码器输入 Surface —— 零拷贝的关键一步
     scErr = OH_AVScreenCapture_StartScreenCaptureWithSurface(capture_, encoderSurface_);
@@ -401,7 +565,219 @@ int32_t ScreenEncoder::StartCaptureLocked() {
     }
     captureStarted_.store(true);
     LOGI("screen capture started with surface");
+
+    // ★★ ResizeCanvas 必须在采集**启动之后**调用（2026-10-15 实测修正）。
+    //
+    //   踩坑：曾放在 StartScreenCapture* 之前 → 系统报
+    //     `ResizeCanvas captureState_ invalid, captureState_:0`（code=2 INVALID_VAL）
+    //   因为该接口要求采集已处于有效状态。
+    //
+    //   作用：强制采集输出分辨率 = 编码器输入分辨率，避免"屏幕尺寸(2860×1272)
+    //   与编码器配置(1280×720)不一致"导致的编码器输入数据错误。
+    //   文档注：需调用方与消费方都支持分辨率变化 —— 编码器按同尺寸配置，满足。
+    {
+        OH_AVSCREEN_CAPTURE_ErrCode rErr =
+            OH_AVScreenCapture_ResizeCanvas(capture_, params_.width, params_.height);
+        if (rErr == AV_SCREEN_CAPTURE_ERR_OK) {
+            LOGI("ResizeCanvas ok -> %{public}dx%{public}d", params_.width, params_.height);
+        } else {
+            LOGW("ResizeCanvas failed code=%{public}d, keep config size", rErr);
+        }
+    }
+    // ★ 恢复采集区域（若此前设置过）。
+    //
+    //   `RestartCapture()` 会 ReleaseCapture() 后重建 `capture_`，区域设置
+    //   跟着旧实例一起丢失。不补回来的话，「小窗投屏」会在一次采集重启后
+    //   **悄悄退化成整屏**（画面突然多出手机全屏内容），日志里却什么都看不到。
+    //   区域只能在采集启动之后设置，所以放在这里而不是 Init 之前。
+    if (areaX_ >= 0 && areaY_ >= 0 && areaW_ > 0 && areaH_ > 0) {
+        OH_Rect area{};
+        area.x = areaX_;
+        area.y = areaY_;
+        area.width = areaW_;
+        area.height = areaH_;
+        OH_AVSCREEN_CAPTURE_ErrCode aErr =
+            OH_AVScreenCapture_SetCaptureArea(capture_, displayId_, &area);
+        if (aErr == AV_SCREEN_CAPTURE_ERR_OK) {
+            LOGI("capture area restored -> %{public}d,%{public}d %{public}dx%{public}d",
+                 areaX_, areaY_, areaW_, areaH_);
+        } else {
+            LOGW("restore capture area failed code=%{public}d, fallback to full screen",
+                 static_cast<int32_t>(aErr));
+        }
+    }
     return STAGE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// ★ 采集区域 —— 「小窗口投屏」的核心实现
+//
+// 背景：应用**不能**自建全局悬浮窗（`FLOAT_VIEW` 等权限要求系统应用，
+//       声明后装机直接失败 9568289，见 EntryAbility.ets 的实测注释）。
+//       可行路径是用户用系统「智慧多窗」把本应用拖成悬浮小窗，再把小窗的
+//       屏幕矩形交给采集器 —— 车机只看到这块，手机其余部分照常使用。
+//
+// 官方语义（native_avscreen_capture.h，@since 20）：
+//   - 采集启动前/后均可调用，运行中可动态改（拖窗口可实时跟随）；
+//   - 坐标与尺寸必须非负，区域不得跨屏；
+//   - 设置失败时沿用上一次的区域。
+// ---------------------------------------------------------------------------
+void ScreenEncoder::SetScreenMeta(uint64_t displayId, int32_t naturalWidth, int32_t naturalHeight,
+                                  int32_t rotation) {
+    std::lock_guard<std::mutex> guard(lock_);
+    displayId_ = displayId;
+    dispW_ = naturalWidth > 0 ? naturalWidth : 0;
+    dispH_ = naturalHeight > 0 ? naturalHeight : 0;
+    dispRotation_ = rotation;
+    LOGI("screen meta: displayId=%{public}llu natural=%{public}dx%{public}d rotation=%{public}d",
+         static_cast<unsigned long long>(displayId_), dispW_, dispH_, dispRotation_);
+}
+
+int32_t ScreenEncoder::SetCaptureArea(int32_t x, int32_t y, int32_t width, int32_t height) {
+    if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        LOGW("SetCaptureArea rejected: invalid rect %{public}d,%{public}d %{public}dx%{public}d",
+             x, y, width, height);
+        return -1;
+    }
+
+    // ★ 坐标系换算（2026-10-18 实测修正）
+    //
+    //   ArkTS 的 `windowRect` 是**当前旋转方向**下的坐标。实测（nova 14 Ultra）：
+    //     自然方向 1272x2860（竖屏），小窗横屏后 windowRect = 133,178 1272x716
+    //     → 直接下发时右边界 133+1272=1405 > 1272，系统报 code=3 INVALID_VAL。
+    //
+    //   采集器要的是**自然方向**坐标，所以旋转时按下面的映射换算：
+    //     ROTATION_90 : px = ly,            py = Ph - (lx + lw), w = lh, h = lw
+    //     ROTATION_270: px = Pw - (ly + lh), py = lx,            w = lh, h = lw
+    //     ROTATION_180: px = Pw - (lx + lw), py = Ph - (ly + lh)
+    int32_t nx = x;
+    int32_t ny = y;
+    int32_t nw = width;
+    int32_t nh = height;
+    bool mapped = false;
+    if (dispW_ > 0 && dispH_ > 0 && dispRotation_ != 0) {
+        switch (dispRotation_) {
+            case 90:  // 顺时针 90°
+                nx = y;
+                ny = dispH_ - (x + width);
+                nw = height;
+                nh = width;
+                mapped = true;
+                break;
+            case 270:  // 顺时针 270°（= 逆时针 90°）
+                nx = dispW_ - (y + height);
+                ny = x;
+                nw = height;
+                nh = width;
+                mapped = true;
+                break;
+            case 180:  // 倒置
+                nx = dispW_ - (x + width);
+                ny = dispH_ - (y + height);
+                mapped = true;
+                break;
+            default:
+                break;
+        }
+        if (mapped) {
+            // 夹进自然屏边界，避免换算误差导致越界被拒
+            if (nx < 0) {
+                nw += nx;
+                nx = 0;
+            }
+            if (ny < 0) {
+                nh += ny;
+                ny = 0;
+            }
+            if (dispW_ > 0 && nx + nw > dispW_) {
+                nw = dispW_ - nx;
+            }
+            if (dispH_ > 0 && ny + nh > dispH_) {
+                nh = dispH_ - ny;
+            }
+            LOGI("capture area mapped (rot=%{public}d): %{public}d,%{public}d %{public}dx%{public}d"
+                 " <- window %{public}d,%{public}d %{public}dx%{public}d",
+                 dispRotation_, nx, ny, nw, nh, x, y, width, height);
+        }
+    }
+    if (nw <= 0 || nh <= 0) {
+        LOGW("SetCaptureArea rejected after mapping: %{public}d,%{public}d %{public}dx%{public}d",
+             nx, ny, nw, nh);
+        return -1;
+    }
+
+    std::lock_guard<std::mutex> guard(lock_);
+
+    if (capture_ == nullptr) {
+        // 采集还没起来：先记映射后的矩形，下次 StartCaptureLocked 会补下发
+        areaX_ = nx;
+        areaY_ = ny;
+        areaW_ = nw;
+        areaH_ = nh;
+        LOGW("SetCaptureArea: capture not created, rect cached (%{public}d,%{public}d %{public}dx%{public}d)",
+             nx, ny, nw, nh);
+        return -2;
+    }
+
+    OH_Rect area{};
+    area.x = nx;
+    area.y = ny;
+    area.width = nw;
+    area.height = nh;
+
+    OH_AVSCREEN_CAPTURE_ErrCode err =
+        OH_AVScreenCapture_SetCaptureArea(capture_, displayId_, &area);
+    if (err != AV_SCREEN_CAPTURE_ERR_OK && mapped) {
+        // 换算结果被拒 → 退一步用原始矩形试一次（有的版本按当前旋转口径收）
+        LOGW("mapped rect rejected code=%{public}d, retry raw rect",
+             static_cast<int32_t>(err));
+        area.x = x;
+        area.y = y;
+        area.width = width;
+        area.height = height;
+        err = OH_AVScreenCapture_SetCaptureArea(capture_, displayId_, &area);
+        if (err == AV_SCREEN_CAPTURE_ERR_OK) {
+            nx = x;
+            ny = y;
+            nw = width;
+            nh = height;
+        }
+    }
+    if (err != AV_SCREEN_CAPTURE_ERR_OK) {
+        LOGW("SetCaptureArea failed code=%{public}d (rect %{public}d,%{public}d %{public}dx%{public}d)",
+             static_cast<int32_t>(err), nx, ny, nw, nh);
+        return -3;
+    }
+
+    areaX_ = nx;
+    areaY_ = ny;
+    areaW_ = nw;
+    areaH_ = nh;
+    LOGI("★ capture area set -> %{public}d,%{public}d %{public}dx%{public}d",
+         nx, ny, nw, nh);
+    if (onLog_) {
+        onLog_("采集区域已切换到当前窗口范围");
+    }
+    return 0;
+}
+
+int32_t ScreenEncoder::ClearCaptureArea() {
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        areaX_ = -1;
+        areaY_ = -1;
+        areaW_ = -1;
+        areaH_ = -1;
+        if (capture_ == nullptr || !captureStarted_.load()) {
+            // 采集没在跑，清掉记录就等于恢复整屏
+            return 0;
+        }
+    }
+    // 官方**没有**「清除区域」接口，唯一可靠的恢复整屏方式是重建采集实例
+    // （新建的 OH_AVScreenCapture 不带区域限制）。
+    // ⚠ 注意 RestartCapture 自带冷却：冷却期内的调用会直接返回成功但**不重建**，
+    //   此时区域仍然生效。上层若要「立刻」恢复整屏，应走完整的 stop→start。
+    return RestartCapture();
 }
 
 // ---------------------------------------------------------------------------

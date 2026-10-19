@@ -1,4 +1,4 @@
-# CarHi · 鸿蒙版 CarLife 手机端
+# autoCar · 鸿蒙版 CarLife 手机端
 
 在 **HarmonyOS NEXT** 上实现百度 CarLife **手机端**，向真实 CarLife 车机推送手机整屏画面。
 
@@ -13,8 +13,9 @@
 | 做 | 不做 |
 |---|---|
 | 屏幕采集 → H.264 编码 → 推流到车机 | 触控回传（车机操作手机） |
-| 车机主动连接后的握手与信令应答 | 音频回传（音频走**系统蓝牙 A2DP**，App 不碰蓝牙 API） |
+| 车机主动连接后的握手与信令应答 | TTS / VR 语音通道（Ch4 / Ch5） |
 | 七个端口的 TCP 服务端监听 | 后台导航信息模式（需车机有地图引擎） |
+| 音频通道 Ch3（TCP 9240，PCM S16LE） | — |
 
 ---
 
@@ -34,8 +35,8 @@
 |---|---|---|---|
 | 1 CMD | 7240 | 控制/信令 | ✅ 必须 |
 | 2 VIDEO | 8240 | H.264 视频流 | ✅ 必须 |
-| 3 AUDIO | 9240 | 媒体音频 PCM | ⛔ 走蓝牙 |
-| 4 TTS | 9241 | 导航语音 PCM | ⛔ 走蓝牙 |
+| 3 AUDIO | 9240 | 媒体音频 PCM | ✅ 已实现（S16LE） |
+| 4 TTS | 9241 | 导航语音 PCM | ⛔ 未实现 |
 | 5 VR | 9242 | 语音识别 | ⛔ |
 | 6 TOUCH | 9340 | 触控/按键 | 仅监听，不处理 |
 | 7 DATA | 9440 | 车况传感器 | 仅监听，不处理 |
@@ -81,16 +82,23 @@ TCP VIDEO 通道 (8240) 发送裸流 (Annex-B NALU)
 
 ```
 CarHi/
+├── HANDOFF.md                  当前进度 / 结论 / 待办 / 编译与签名命令（换机器先看这个）
+├── STREAMING.md                推流通路说明（画面源 / 音频通道 / 投屏窗口 / 权限边界）
 ├── PLAN.md                     技术方案全文（协议规格、设计决策、坑位记录）
 ├── harmony/                    鸿蒙工程
 │   ├── AppScope/app.json5      bundleName: com.carhi.carlifephone
 │   └── entry/src/main/
-│       ├── cpp/                Native 采集编码（screen_encoder / napi_init）
+│       ├── cpp/                screen_encoder（采集+硬编）/ hmi_renderer（自绘 HMI）
+│       │                       canvas_encoder / keepalive_capture / napi_init
 │       └── ets/
-│           ├── core/           NativeCodec / BackgroundKeeper / CarLifeEngine
+│           ├── core/           CarLifeEngine / StateMachine / CaptureGate / UsbProbe
+│           │                   NativeHmiSource / ScreenCaptureSource / CanvasFrameSource
+│           │                   AmapNaviBridge / AmapIconMapper / WifiProbe
 │           ├── protocol/       Constants / Framing / Protobuf / Messages
 │           ├── transport/      ChannelServer（7 端口 TCP 服务端）
-│           └── pages/          Index（主界面）
+│           ├── accessibility/  无障碍扩展（读导航信息，可选）
+│           └── pages/          Index / MapPage / AmapNaviPage / CastWindow / FloatBall
+├── design/nav-hmi/             自绘 HMI 的设计稿与真机截图
 ├── tools/                      构建 / 签名 / 验证脚本
 └── certs/                      签名材料（私钥不入库，见 certs/README.md）
 ```
@@ -107,6 +115,11 @@ bash tools/build.sh clean      # 清空产物从零构建
 bash tools/build.sh release    # release 模式
 bash tools/build.sh signed     # 构建 + 签名（需先备好 certs/ 里的证书）
 ```
+
+> ⚠️ **首次构建前先装三方依赖**（高德 SDK 是 5 个字节码 HAR，`oh_modules/` 不进仓库）：
+> `ohpm install --all`；且 `build-profile.json5` 的
+> `app.products[0].buildOption.strictMode.useNormalizedOHMUrl` 必须为 `true`。
+> 细节见 [HANDOFF.md](HANDOFF.md) 6.6。
 
 工具链不在默认位置时用环境变量覆盖：
 
@@ -162,16 +175,23 @@ node tools/static_check.mjs      # 常量/引用一致性
 
 ## 当前状态
 
+> 进度与待办以 [HANDOFF.md](HANDOFF.md) 为准；各推流通路的细节见 [STREAMING.md](STREAMING.md)。
+> 当前代码对应远端提交 `c0b9bdf`（2026-10-18）。
+
 | 项 | 状态 |
 |---|---|
 | 协议逆向核实 | ✅ 字节级对拍通过 |
-| 传输层 / 状态机 | ✅ 方向校验通过 |
-| Native 采集编码管线 | ✅ 编译通过、符号与依赖已核 |
-| ArkTS / C++ 编译 | ✅ 0 错误 |
-| HAP 打包 | ✅ 但**未签名**（待 AGC 证书） |
-| 真机运行 | ⬜ 未验证（采集授权、编码出画、真机握手、蓝牙音频、安卓 4.4 流畅度） |
+| 传输层 / 状态机 | ✅ 方向校验通过（含 65609 鉴权修复） |
+| WiFi 直连推流 | ✅ **真机验证通过**，长时间稳定 |
+| 画面通路 | ✅ 自绘 HMI / 整屏采集 / 独立投屏窗口 / 高德真地图 |
+| 系统小窗接管投屏 | ⏳ 代码完成，待真机验证拖拽入口 |
+| 音频通道 Ch3 | ✅ 已实现（实测见 `STREAMING.md` 3.4） |
+| ArkTS / C++ 编译 | ✅ 0 错误（本机 re-verified） |
+| HAP 打包 | ✅ 签名成功（调试证书，hdc 安装） |
+| USB 直连 | ⏳ 诊断模块就绪，待实测 |
+| 无线盒子 QH3002 | ⏸ 未开始 |
 
-> **编译通过 ≠ 能跑。** 所有运行期行为都需要真机验证。
+> **编译通过 ≠ 能跑。** 未装机验证的行为都不算完成。
 
 ---
 

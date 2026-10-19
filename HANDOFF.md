@@ -2,7 +2,7 @@
 
 > 用途：换机器继续开发时，**先看这一份**。它记录当前进度、已确认的结论、待办与踩过的坑。
 > 配套：`PLAN.md`（完整技术方案）、`refs/OFFICIAL_PROTOCOL.md`（官方协议逆向对照）
-> 最后更新：2026-10-12
+> 最后更新：2026-10-18（已同步至 `c0b9bdf`）
 
 ---
 
@@ -12,7 +12,8 @@
 车机是老旧安卓（跑不动高德车机版），因此**手机负责渲染，车机只当显示器**。
 
 - 仓库：`https://github.com/121ZM/carhi.git`
-- 范围：**仅推流**。不做触控回传、不做音频（走蓝牙 A2DP 独立通道）
+- 范围：**推流 + 音频通道**。不做触控回传
+  （音频已从"走蓝牙"改为**自实现 Ch3 / TCP 9240**，见 `STREAMING.md` 第三节）
 - 包名：`com.carhi.carlifephone`（注意：不是 `com.baidu.carlife`）
 
 ---
@@ -27,8 +28,16 @@
 | 服务默认开启 | ✅ 进入首页自动启动 |
 | 长时任务保活 | ✅ 全生命周期持有 |
 | 录屏授权弹窗优化 | ✅ 已做门控（系统强制弹窗无法消除） |
+| 自绘 HMI 渲染（`hmi_renderer.cpp` / `NativeHmiSource`） | ✅ 可用（`STREAMING.md` 2.1） |
+| 整屏采集投屏（`ScreenCaptureSource`） | ✅ 可用（2.2） |
+| 系统小窗「智慧多窗」接管投屏 | ✅ 代码完成，**待真机验证拖拽入口**（2.3，主推路径） |
+| 独立投屏窗口 + 区域采集（`CastWindow`） | ✅ 可用（2.4） |
+| 高德真地图（`MapPage` / `AmapNaviBridge`） | ✅ 可用（2.5） |
+| 音频通道 Ch3 / TCP 9240 | ✅ 已实现，实测见 `STREAMING.md` 3.4 |
 | **USB 直连** | ⏳ **待实测**（诊断模块已就绪） |
 | 无线盒子（QH3002） | ⏸ 未开始，等 USB 结论 |
+
+> 各画面通路的实现细节、权限边界、真机验证状态见 **`STREAMING.md`**（专门的推流能力说明）。
 
 ---
 
@@ -178,6 +187,39 @@ export JAVA_HOME="<DevEco>/jbr"     # 不设会报 "JAVA_HOME is not set"
 # jadx 位于 /tmp/jadx（临时目录，换机器需重装）
 ```
 
+### 6.6 换机器必做：装三方依赖 + 补构建开关
+
+代码里已引入**高德地图 SDK**（5 个字节码 HAR：`@amap/amap_lbs_{common,location,map3d,navi,search}`），
+`oh_modules/` 不进仓库，**新机器直接编译会失败**。两条必做：
+
+```bash
+# ① 装依赖（约 50s，6 个包，走 repo.harmonyos.com）
+cd harmony
+"<DevEco>/tools/ohpm/bin/ohpm.bat" install --all
+```
+
+② `harmony/build-profile.json5` 是 **skip-worktree 隔离的本地文件**（仓库版 `signingConfigs: []`），
+里面必须在 `app.products[0].buildOption.strictMode` 下补：
+
+```json5
+"buildOption": { "strictMode": { "useNormalizedOHMUrl": true } }
+```
+
+> 缺这条会在 `GenerateLoaderJson` 阶段报 `00306046 Specification Limit Violation`：
+> `Bytecode HAR [...] not supported when useNormalizedOHMUrl is not true`。
+> 同时该文件里还放着本机签名配置（证书 / Profile / 口令），**不要用仓库版覆盖**。
+
+### 6.7 现有产物（dist/）
+
+| 文件 | 说明 |
+|---|---|
+| `CarHi-v0.2-usbprobe.hap` / `...-release.hap` | 10-12 构建，**已不含**新功能 |
+| `carhi-repo-cc1ba18.zip` | 10-12 的仓库快照 |
+| `carhi-repo.bundle` / `carhi-code-snapshot.zip` | 早期迁移包 |
+
+> 最新包在 `harmony/entry/build/default/outputs/default/entry-default-signed.hap`（约 167 MB，
+> 体积主要来自高德 SDK 的地图资源）。
+
 ---
 
 ## 七、代码结构（本轮新增部分）
@@ -209,7 +251,8 @@ harmony/entry/src/main/ets/
 
 ## 九、尚未修复 / 已知问题
 
-- `video encoder error code=10`：`OnCodecError` 把 native 错误码直接当 `CaptureInterrupt` 用，语义不匹配（`screen_encoder.cpp`）
+- `video encoder error code=10`：`OnCodecError` 把编码器原始错误码直接透传给上层
+  （采集侧中断已有独立 `INTERRUPT_*` 码，编码器侧仍无独立码空间，`screen_encoder.cpp:67`）
 - `setExtraOptions failed` 低延迟优化（部分平台不支持，已容忍）
 - UDP 7999 发现端口未实现（手动填 IP 已绕过）
 - 长时任务常驻通知可考虑降级为静默通知

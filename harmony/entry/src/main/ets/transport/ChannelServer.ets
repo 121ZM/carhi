@@ -18,7 +18,7 @@
 
 import { socket } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { ALL_CHANNELS, ChannelDef, CHANNEL_CMD, CHANNEL_VIDEO } from '../protocol/Constants';
+import { ALL_CHANNELS, ChannelDef, CHANNEL_AUDIO, CHANNEL_CMD, CHANNEL_VIDEO } from '../protocol/Constants';
 import { MessageStreamReader, Message } from '../protocol/Framing';
 
 const TAG = 'CarLifeChannelServer';
@@ -39,6 +39,16 @@ export interface ChannelServerListener {
    * 丢了会让车机判定手机失联，表现为周期性断开重连。
    */
   onVideoMessage?: (msg: Message) => void;
+  /**
+   * 其余通道（AUDIO / TTS / VR / TOUCH / DATA）收到报文。
+   *
+   * ★ 这些通道**并非"只发不收"**，此前这里没有回调，数据读进来即被丢弃：
+   *   - TOUCH(9340, Ch6)：车机在这里下发触控事件（`CarlifeTouchAction` 425985 等）
+   *     —— 车机屏幕上点的每一下都走这条路，丢了就"点不动"。
+   *   - DATA(9440, Ch7)：双向（车况 / 媒体信息）。
+   *   - AUDIO/TTS/VR：主要出站，入站多为状态通知。
+   */
+  onOtherMessage?: (channel: number, msg: Message) => void;
   /** 出错 */
   onError?: (channel: number, err: string) => void;
 }
@@ -130,8 +140,11 @@ class ChannelServer {
             // 视频通道并非"只发不收"：车机在这里下发 131074 心跳。
             // 漏掉这一条会导致车机判定手机失联 → 周期性断开重连。
             this.listener.onVideoMessage(msg);
+          } else if (this.listener.onOtherMessage) {
+            // ★ 其余通道也不是"只发不收"：TOUCH(9340) 承载车机的触控事件，
+            //   DATA(9440) 是双向的。此前这里没有分支 → 数据读进来即被丢弃。
+            this.listener.onOtherMessage(this.channel, msg);
           }
-          // 其余通道（触控/音频）确实只接收不处理
         }
       } catch (e) {
         const err = e as BusinessError;
@@ -215,12 +228,35 @@ export class CarLifeChannelServer {
     this.listener = listener;
   }
 
+  /**
+   * 上一次 `start()` 的逐端口结果（形如 `:7240 OK` / `:7240 FAIL(xxx)`）。
+   *
+   * 为什么要暴露出来：`CarLifeEngine.start()` 原来在 `server.start()` 之后
+   * **无条件**打印「已在 7240/... 端口监听」—— 哪怕 7 个端口全部绑定失败也照打，
+   * 界面上就会出现「已监听」而实际一个都没绑上的假象。
+   * 现在由调用方按**真实结果**说话。
+   */
+  private lastResults: string[] = [];
+  /** 上一次 start() 里成功绑定的端口数 */
+  private lastOkCount: number = 0;
+
+  /** 逐端口结果，未启动过为空数组 */
+  get listenResults(): string[] {
+    return this.lastResults;
+  }
+
+  /** 成功绑定的端口数 */
+  get listeningCount(): number {
+    return this.lastOkCount;
+  }
+
   /** 启动全部 7 个端口监听 */
   async start(): Promise<void> {
     if (this.started) {
       return;
     }
     const results: string[] = [];
+    let okCount: number = 0;
     for (let i = 0; i < ALL_CHANNELS.length; i++) {
       const def: ChannelDef = ALL_CHANNELS[i];
       const srv = new ChannelServer(def, this.listener);
@@ -228,6 +264,7 @@ export class CarLifeChannelServer {
         await srv.listen();
         this.channels.set(def.channel, srv);
         results.push(`:${def.port} OK`);
+        okCount++;
       } catch (e) {
         const err = e as BusinessError;
         results.push(`:${def.port} FAIL(${err.message})`);
@@ -236,6 +273,8 @@ export class CarLifeChannelServer {
         }
       }
     }
+    this.lastResults = results;
+    this.lastOkCount = okCount;
     this.started = true;
     console.info(`${TAG} listen result: ${results.join(', ')}`);
   }
@@ -263,6 +302,11 @@ export class CarLifeChannelServer {
   /** 视频通道是否就绪 */
   get isVideoReady(): boolean {
     return this.isConnected(CHANNEL_VIDEO);
+  }
+
+  /** 媒体音频通道（Ch3/9240）是否就绪 */
+  get isAudioReady(): boolean {
+    return this.isConnected(CHANNEL_AUDIO);
   }
 
   /** 停止全部通道 */

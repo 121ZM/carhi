@@ -23,6 +23,8 @@ if [ -z "${CLT_HOME:-}" ]; then
       "D:/dev/Huawei/DevEco Studio" \
       "/d/dev/DevEco Studio" \
       "D:/dev/DevEco Studio" \
+      "/e/Program Files/Huawei/DevEco Studio" \
+      "E:/Program Files/Huawei/DevEco Studio" \
       "E:/AITools/command-line-tools" ; do
     if [ -f "$candidate/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar" ]; then
       CLT_HOME="$candidate"

@@ -90,7 +90,21 @@ export class CarlifeProtocolVersionMatchStatus {
 
 // ============================================================
 // 3. CarlifeDeviceInfo
-//    字段 1-23，见 proto_codec.py
+//    字段 1-27，**照 refs/carlife_proto/CarlifeDeviceInfoProto.proto 抄**
+//
+//    ★ 2026-10-13 修正：此前把 `carlifeversion` 写在**字段 22**，是错的。
+//      官方 proto 原文：
+//          optional string token          = 22;
+//          optional string btaddress      = 23;
+//          optional string carlifeversion = 24;   ← 真正的字段号
+//          optional int32  carlifeType    = 25;
+//          optional string year           = 26;
+//          optional int32  carlifeSdkInt  = 27;
+//      即字段 22 的语义是 `token`，不是版本号。原实现等于把 "1.0.0" 当 token
+//      发给了车机，而车机真正想读的 carlifeversion 一直没收到。
+//      车机端 APK 里同样存在 `token_` / `carlifeversion_` / `year_` 字段，
+//      且官方手机端有 `carlifeversion=`、`carlifeSdkInt=` 的日志格式串，
+//      说明这两个字段官方**确实会填**。
 // ============================================================
 export class CarlifeDeviceInfo {
   os: string = '';
@@ -114,8 +128,12 @@ export class CarlifeDeviceInfo {
   release: string = '';
   sdk: string = '';
   sdkInt: number = 0;
-  carlifeversion: string = '';
+  token: string = '';
   btaddress: string = '';
+  carlifeversion: string = '';
+  carlifeType: number = 0;
+  year: string = '';
+  carlifeSdkInt: number = 0;
 
   encode(): Uint8Array {
     const w = new ProtobufWriter();
@@ -140,8 +158,12 @@ export class CarlifeDeviceInfo {
     if (this.release !== '') { w.writeString(19, this.release); }
     if (this.sdk !== '') { w.writeString(20, this.sdk); }
     if (this.sdkInt !== 0) { w.writeInt32(21, this.sdkInt); }
-    if (this.carlifeversion !== '') { w.writeString(22, this.carlifeversion); }
+    if (this.token !== '') { w.writeString(22, this.token); }
     if (this.btaddress !== '') { w.writeString(23, this.btaddress); }
+    if (this.carlifeversion !== '') { w.writeString(24, this.carlifeversion); }
+    if (this.carlifeType !== 0) { w.writeInt32(25, this.carlifeType); }
+    if (this.year !== '') { w.writeString(26, this.year); }
+    if (this.carlifeSdkInt !== 0) { w.writeInt32(27, this.carlifeSdkInt); }
     return w.toBytes();
   }
 
@@ -172,8 +194,12 @@ export class CarlifeDeviceInfo {
       else if (f.fieldNumber === 19) { msg.release = s; }
       else if (f.fieldNumber === 20) { msg.sdk = s; }
       else if (f.fieldNumber === 21) { msg.sdkInt = f.varintValue; }
-      else if (f.fieldNumber === 22) { msg.carlifeversion = s; }
+      else if (f.fieldNumber === 22) { msg.token = s; }
       else if (f.fieldNumber === 23) { msg.btaddress = s; }
+      else if (f.fieldNumber === 24) { msg.carlifeversion = s; }
+      else if (f.fieldNumber === 25) { msg.carlifeType = f.varintValue; }
+      else if (f.fieldNumber === 26) { msg.year = s; }
+      else if (f.fieldNumber === 27) { msg.carlifeSdkInt = f.varintValue; }
     }
     return msg;
   }

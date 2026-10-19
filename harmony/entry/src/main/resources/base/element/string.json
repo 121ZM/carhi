@@ -10,7 +10,7 @@
     },
     {
       "name": "EntryAbility_label",
-      "value": "CarHi"
+      "value": "autoCar"
     },
     {
       "name": "BackgroundAbility_desc",
@@ -27,6 +27,26 @@
     {
       "name": "reason_bluetooth",
       "value": "用于导航语音通过蓝牙输出到车机"
+    },
+    {
+      "name": "accessibility_label",
+      "value": "autoCar 车机触控"
+    },
+    {
+      "name": "accessibility_desc",
+      "value": "把车机屏幕上的触控操作注入到手机（探针阶段，仅用于验证注入能力）"
+    },
+    {
+      "name": "reason_location",
+      "value": "导航需要获取实时位置才能计算路线与转向提示"
+    },
+    {
+      "name": "reason_float",
+      "value": "悬浮球用于随时开启/停止车机投屏"
+    },
+    {
+      "name": "reason_microphone",
+      "value": "屏幕采集需要麦克风录音流，长时任务才不会被系统挂起"
     }
   ]
 }
